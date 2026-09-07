@@ -27,6 +27,21 @@ drift, because there is nothing to drift from.
 This is not a shortcut. It is what a determinism contract is *for*, and it is
 why ADR 0045 was worth the trouble it caused.
 
+## 1b. Addendum, 2026-09-07 — the premise is per-build
+
+**Corrected by ADR 0096.** The sentence above should read "two machines
+*running the same build*". `cargo xtask repeat` proves reproduction across
+processes of one binary on one machine; nothing had compared two platforms,
+because until the Windows cross-build there was only one.
+
+Measured: a Linux and a Windows build of the same commit agree for the first few
+ticks and have drifted through 37 values of simulation state by tick 300, at
+about 1e-8 relative — the platform math library, which is not required to round
+`sin` and `cos` identically.
+
+Same-platform lockstep is unaffected. **Cross-platform lockstep will desync**,
+and the hash exchange in §5 will say so. See ADR 0096 §3 for the options.
+
 ## 2. Decision
 
 Deterministic lockstep with an input delay of 8 ticks (133 ms at 60 Hz). Each

@@ -489,7 +489,7 @@ fn main() -> std::process::ExitCode {
     cargo xtask shimmer
     cargo xtask repeat
     cargo xtask ablate
-      cargo xtask dist"
+      cargo xtask dist [--windows]"
             );
             std::process::ExitCode::from(2)
         }
@@ -3403,6 +3403,28 @@ impl Drop for GateLock {
     }
 }
 
+/// Cross-compile the Windows binary — ADR 0096.
+///
+/// **The whole workspace compiles for `x86_64-pc-windows-gnu` unchanged**: ash
+/// loads `vulkan-1.dll` at runtime, winit and cpal have Windows backends, and
+/// the shaders were already SPIR-V compiled on the host. Only linking needs
+/// anything, and that is `mingw-w64-gcc`.
+fn build_windows(root: &Path) -> Result<PathBuf, String> {
+    const TARGET: &str = "x86_64-pc-windows-gnu";
+    let status = Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "--release", "--target", TARGET, "-p", "loom_cli"])
+        .status()
+        .map_err(|e| format!("cannot run cargo: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "the Windows build failed ({status}). It needs `rustup target add {TARGET}` \
+             and the mingw-w64 toolchain."
+        ));
+    }
+    Ok(root.join("target").join(TARGET).join("release/loom.exe"))
+}
+
 /// The scene a dist is built around, and the root of the reachability walk.
 const GAME_SCENE: &str = "assets/games/deeper_demo.loom";
 
@@ -3425,12 +3447,27 @@ const GAME_SCENE: &str = "assets/games/deeper_demo.loom";
 /// anywhere and why the dist is checked from `/` below.
 fn dist() -> std::process::ExitCode {
     let root = repo_root();
+    let windows = std::env::args().any(|a| a == "--windows");
     let loom = match build_release(&root) {
         Ok(path) => path,
         Err(message) => {
             eprintln!("xtask: {message}");
             return std::process::ExitCode::from(2);
         }
+    };
+
+    // **The Linux binary is built either way**, because it is the one that
+    // packs the assets — `loom pack` has to run on this machine.
+    let shipped = if windows {
+        match build_windows(&root) {
+            Ok(path) => path,
+            Err(message) => {
+                eprintln!("xtask: {message}");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    } else {
+        loom.clone()
     };
 
     // Under `target/`, so it is a build output like any other and `cargo clean`
@@ -3444,7 +3481,8 @@ fn dist() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
 
-    if let Err(e) = std::fs::copy(&loom, out.join("loom")) {
+    let binary_name = if windows { "loom.exe" } else { "loom" };
+    if let Err(e) = std::fs::copy(&shipped, out.join(binary_name)) {
         eprintln!("xtask: cannot copy the binary: {e}");
         return std::process::ExitCode::from(2);
     }
@@ -3480,17 +3518,23 @@ fn dist() -> std::process::ExitCode {
     // `$0` rather than a hardcoded path, and `exec` rather than a subshell, so
     // the launcher works from any working directory and the game is the process
     // the player's window manager sees.
-    let launcher = out.join("play.sh");
-    let script = "#!/bin/sh\n\
+    let launcher = out.join(if windows { "play.bat" } else { "play.sh" });
+    // `%~dp0` is the batch equivalent of the shell dance below: the directory
+    // this file sits in, so the game runs from anywhere.
+    let windows_script = "@echo off\r\n\
+        rem DEEPER. Run it from anywhere — the assets resolve relative to this file.\r\n\
+        \"%~dp0loom.exe\" run \"%~dp0assets\\games\\deeper_demo.loom\" --menu %*\r\n";
+    let posix_script = "#!/bin/sh\n\
         # DEEPER. Run it from anywhere — the assets resolve relative to this file.\n\
         here=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
         exec \"$here/loom\" run \"$here/assets/games/deeper_demo.loom\" --menu \"$@\"\n";
+    let script = if windows { windows_script } else { posix_script };
     if let Err(e) = std::fs::write(&launcher, script) {
         eprintln!("xtask: cannot write the launcher: {e}");
         return std::process::ExitCode::from(2);
     }
     #[cfg(unix)]
-    {
+    if !windows {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
         {
@@ -3499,7 +3543,7 @@ fn dist() -> std::process::ExitCode {
         }
     }
 
-    let binary = std::fs::metadata(out.join("loom")).map_or(0, |m| m.len());
+    let binary = std::fs::metadata(out.join(binary_name)).map_or(0, |m| m.len());
     let pack = std::fs::metadata(out.join("assets.pack")).map_or(0, |m| m.len());
     println!(
         "dist: {} — {} binary, {} of assets reachable from {GAME_SCENE}",
@@ -3511,7 +3555,11 @@ fn dist() -> std::process::ExitCode {
     // `tar` rather than a crate: it is on every machine that can run the game,
     // and a dependency to write a file format the system already writes is the
     // kind of thing this project does not do.
-    let archive = root.join("target/dist/deeper-linux-x86_64.tar.zst");
+    let archive = root.join(if windows {
+        "target/dist/deeper-windows-x86_64.tar.zst"
+    } else {
+        "target/dist/deeper-linux-x86_64.tar.zst"
+    });
     let tarred = Command::new("tar")
         .arg("--zstd")
         .arg("-cf")
