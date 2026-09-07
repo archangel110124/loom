@@ -121,3 +121,28 @@ move_right   = [{ axis = "PadLeftStickX" }]
 # pair of buttons does.
 move_up      = [{ axis = "PadRightTrigger2" }]
 move_down    = [{ axis = "PadLeftTrigger2" }]
+
+# ---------------------------------------------------------------------------
+# Menus — ADR 0087. A context of its own, because the same stick that walks a
+# character has to move a highlight when a menu is up, and one action name
+# cannot mean two things at one moment.
+#
+# **`pressed`, not held, on every one of these.** A held key repeats at the
+# frame rate, and a menu of two items under a held stick is a blur. One press is
+# one step; the player releases and presses again to move again.
+#
+# The stick is deliberately NOT bound here. An analog source has no press
+# transition — it is a level — so a stick nudged past its dead zone would step
+# the highlight every frame it stayed there. The D-pad is buttons and behaves.
+[contexts.menu.actions]
+menu_up      = [{ button = "ArrowUp",   trigger = "pressed" },
+                { button = "KeyW",      trigger = "pressed" },
+                { button = "PadDPadUp", trigger = "pressed" }]
+menu_down    = [{ button = "ArrowDown",   trigger = "pressed" },
+                { button = "KeyS",        trigger = "pressed" },
+                { button = "PadDPadDown", trigger = "pressed" }]
+# Enter and Space from the keyboard, South from a pad — the same button that
+# jumps in play, which is the convention every controller game uses.
+menu_confirm = [{ button = "Enter",    trigger = "pressed" },
+                { button = "Space",    trigger = "pressed" },
+                { button = "PadSouth", trigger = "pressed" }]

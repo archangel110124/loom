@@ -172,6 +172,12 @@ const FLY: &str = "fly";
 const PLAY: &str = "play";
 /// Editing actions, live only when `--edit` was passed.
 const EDIT: &str = "edit";
+/// Menus, in a context of their own — ADR 0087.
+///
+/// **Not `fly` or `play`**: the same stick that walks a character must move a
+/// highlight when a menu is up, and one action name cannot mean two things at
+/// one moment. A context is exactly the tool this crate already had for that.
+const MENU: &str = "menu";
 /// What Play prints when it hands a character over.
 ///
 /// One string rather than one per call site, because it is the only place
@@ -649,6 +655,8 @@ struct App {
     /// box, in a container with no `/dev/input`, or on CI, none of which should
     /// stop a scene from opening.
     gamepads: Option<loom_input::Gamepads>,
+    /// Which menu item is selected, and whether anything is — ADR 0087.
+    menu_focus: crate::hud::MenuFocus,
     window: Option<Arc<Window>>,
     viewer: Option<Viewer>,
     /// Kept alive for the whole session: destroying the device before the
@@ -860,6 +868,7 @@ impl App {
             bindings,
             input: InputState::new(),
             gamepads,
+            menu_focus: crate::hud::MenuFocus::default(),
             window: None,
             viewer: None,
             dock: None,
@@ -2047,6 +2056,17 @@ impl ApplicationHandler for App {
                 // now goes with the word.
                 let title_lines = self.play.is_none() && self.front.is_some();
                 let title_up = self.front.as_ref().is_some_and(|f| !f.leaving);
+                // **Resolved out here, because `self` is borrowed inside the
+                // closure below.** The menus take a plain struct of booleans so
+                // `hud` never learns what a gamepad is — the binding layer has
+                // already turned a D-pad, a stick past its dead zone and the
+                // arrow keys into the same three facts.
+                let nav = crate::hud::MenuNav {
+                    up: self.input.is_active(&self.bindings, MENU, "menu_up"),
+                    down: self.input.is_active(&self.bindings, MENU, "menu_down"),
+                    confirm: self.input.is_active(&self.bindings, MENU, "menu_confirm"),
+                };
+                let mut menu_focus = self.menu_focus;
                 let curtain = self.front.as_ref().map(|f| crate::hud::curtain(f.clock));
                 let room_code = self.room_code.as_deref();
                 let mut pause_choice = None;
@@ -2130,9 +2150,11 @@ impl ApplicationHandler for App {
                                 let _ = crate::hud::creel(root, view);
                             }
                             if title_up {
-                                title_choice = crate::hud::title_menu(root);
+                                title_choice =
+                                    crate::hud::title_menu(root, nav, &mut menu_focus);
                             } else if menu_open {
-                                pause_choice = crate::hud::pause_menu(root);
+                                pause_choice =
+                                    crate::hud::pause_menu(root, nav, &mut menu_focus);
                                 if let Some(code) = room_code {
                                     room_code_panel(root, code, &painted);
                                 }
@@ -2169,6 +2191,11 @@ impl ApplicationHandler for App {
                     .front
                     .as_ref()
                     .is_some_and(|f| title_answers(f.clock));
+                // **Written back, or the selection resets every frame** and the
+                // highlight can never move: `step` would run on a fresh
+                // `MenuFocus` each time and the menu would look inert while
+                // reporting that it engaged.
+                self.menu_focus = menu_focus;
                 match title_choice.filter(|_| answerable) {
                     Some(crate::hud::TitleChoice::Start) => {
                         if let Some(front) = self.front.as_mut() {
@@ -3759,7 +3786,11 @@ mod tests {
         let mut labels: Vec<(String, egui::Pos2, usize)> = Vec::new();
         for _ in 0..2 {
             let out = ctx.run_ui(input.clone(), |root| {
-                let _ = crate::hud::pause_menu(root);
+                let _ = crate::hud::pause_menu(
+                    root,
+                    crate::hud::MenuNav::default(),
+                    &mut crate::hud::MenuFocus::default(),
+                );
                 room_code_panel(root, &code, &[]);
             });
             labels = out

@@ -204,6 +204,69 @@ pub(crate) fn draw(
     (viewport, painted)
 }
 
+/// One frame's worth of menu navigation, already resolved from the action map.
+///
+/// **A plain struct of booleans, so this module stays free of `loom_input`.**
+/// The menus care that "down" happened, not that it came from `ArrowDown`, a
+/// D-pad or a stick past its dead zone — that resolution belongs in `run.rs`
+/// where the bindings live, and keeping it there is what lets these functions
+/// be tested without an input map at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MenuNav {
+    pub up: bool,
+    pub down: bool,
+    pub confirm: bool,
+}
+
+/// Which item a menu has selected — ADR 0087.
+///
+/// **Nothing is selected until the player moves.** A menu that highlights its
+/// first item on open fights the mouse: the pointer is somewhere else, and the
+/// highlight says "this is what Enter does" while the eye is on something the
+/// pointer is over. So `engaged` starts false, the first `up`/`down` engages it,
+/// and hovering hands control back to the mouse.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MenuFocus {
+    index: usize,
+    engaged: bool,
+}
+
+impl MenuFocus {
+    /// Apply a frame of navigation to a menu of `len` items.
+    ///
+    /// Wraps at both ends, because a menu of two with a stick in your hand is
+    /// exactly where an unwrapped list feels broken.
+    pub(crate) fn step(&mut self, nav: MenuNav, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let delta = i64::from(nav.down) - i64::from(nav.up);
+        if delta == 0 {
+            return;
+        }
+        if self.engaged {
+            #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+            let next = (self.index as i64 + delta).rem_euclid(len as i64) as usize;
+            self.index = next;
+        } else {
+            // The first press engages without moving: pressing down on a fresh
+            // menu should light up the first item, not the second.
+            self.engaged = true;
+            self.index = if delta > 0 { 0 } else { len - 1 };
+        }
+    }
+
+    /// The selected index, or `None` while the mouse is still in charge.
+    pub(crate) fn selected(self) -> Option<usize> {
+        self.engaged.then_some(self.index)
+    }
+
+    /// Hand control back to the pointer.
+    pub(crate) fn disengage(&mut self) {
+        self.engaged = false;
+    }
+}
+
 /// What the human picked in the pause menu, if anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PauseChoice {
@@ -292,10 +355,15 @@ pub(crate) enum TitleChoice {
 /// in position, heading and items, and unifying two callers costs a
 /// six-parameter function to save thirty lines that will never both change.
 /// If a third menu appears, unify then.
-pub(crate) fn title_menu(root: &mut egui::Ui) -> Option<TitleChoice> {
+pub(crate) fn title_menu(
+    root: &mut egui::Ui,
+    nav: MenuNav,
+    focus: &mut MenuFocus,
+) -> Option<TitleChoice> {
     let viewport = root.available_rect_before_wrap();
     let mut choice = None;
     let items = [("Start", TitleChoice::Start), ("Quit", TitleChoice::Quit)];
+    focus.step(nav, items.len());
     egui::Area::new(egui::Id::new("loom_title_menu"))
         .order(egui::Order::Foreground)
         // Below the word, which the scene anchors just under centre.
@@ -303,14 +371,20 @@ pub(crate) fn title_menu(root: &mut egui::Ui) -> Option<TitleChoice> {
         .show(root.ctx(), |ui| {
             ui.set_width(MENU_WIDTH);
             ui.vertical_centered(|ui| {
-                for (label, picked) in items {
+                for (index, (label, picked)) in items.into_iter().enumerate() {
                     // **Twenty points, not egui's thirteen.** The default is
                     // sized for an inspector row, and under a 96-point word it
                     // reads as a tooltip somebody left on. These two are the
                     // only controls on the screen and the largest target on it
                     // should not be the smallest text.
-                    let button = egui::Button::new(egui::RichText::new(label).size(20.0));
-                    if ui.add_sized([MENU_WIDTH, 40.0], button).clicked() {
+                    let chosen = focus.selected() == Some(index);
+                    let button = egui::Button::new(egui::RichText::new(label).size(20.0))
+                        .selected(chosen);
+                    let response = ui.add_sized([MENU_WIDTH, 40.0], button);
+                    if response.hovered() {
+                        focus.disengage();
+                    }
+                    if response.clicked() || (chosen && nav.confirm) {
                         choice = Some(picked);
                     }
                     ui.add_space(10.0);
@@ -441,12 +515,17 @@ pub(crate) fn fade(root: &egui::Ui, alpha: f32) {
 /// The scrim goes into `root`, which is the background layer — so it dims the
 /// scene and the HUD and leaves the panels alone. That is what a player wants
 /// in `--play` and what an editor wants in `--edit`.
-pub(crate) fn pause_menu(root: &mut egui::Ui) -> Option<PauseChoice> {
+pub(crate) fn pause_menu(
+    root: &mut egui::Ui,
+    nav: MenuNav,
+    focus: &mut MenuFocus,
+) -> Option<PauseChoice> {
     let viewport = root.available_rect_before_wrap();
     dim(root, SCRIM);
 
     let mut choice = None;
     let items = [("Resume", PauseChoice::Resume), ("Quit", PauseChoice::Quit)];
+    focus.step(nav, items.len());
     egui::Area::new(egui::Id::new("loom_pause_menu"))
         .order(egui::Order::Foreground)
         .fixed_pos(viewport.center() - egui::vec2(MENU_WIDTH * 0.5, 90.0))
@@ -465,9 +544,17 @@ pub(crate) fn pause_menu(root: &mut egui::Ui) -> Option<PauseChoice> {
                         .color(egui::Color32::from_gray(180)),
                 );
                 ui.add_space(16.0);
-                for (label, picked) in items {
-                    let button = egui::Button::new(label);
-                    if ui.add_sized([MENU_WIDTH, 34.0], button).clicked() {
+                for (index, (label, picked)) in items.into_iter().enumerate() {
+                    let chosen = focus.selected() == Some(index);
+                    let button = egui::Button::new(label).selected(chosen);
+                    let response = ui.add_sized([MENU_WIDTH, 34.0], button);
+                    // The pointer takes the highlight back the moment it is
+                    // over something, so the two never disagree about what
+                    // Enter would do.
+                    if response.hovered() {
+                        focus.disengage();
+                    }
+                    if response.clicked() || (chosen && nav.confirm) {
                         choice = Some(picked);
                     }
                     ui.add_space(8.0);
@@ -1336,6 +1423,63 @@ mod tests {
         assert_eq!(plate, egui::Color32::from_black_alpha(90));
     }
 
+    /// **A fresh menu selects nothing**, so the highlight never disagrees with
+    /// where the pointer is. The first press engages without moving: pressing
+    /// down on a menu you just opened should light the *first* item, not skip
+    /// past it to the second.
+    #[test]
+    fn the_first_press_engages_without_skipping() {
+        let mut focus = super::MenuFocus::default();
+        assert_eq!(focus.selected(), None, "nothing is selected until you move");
+        focus.step(super::MenuNav { down: true, ..Default::default() }, 2);
+        assert_eq!(focus.selected(), Some(0), "down engages on the first item");
+        focus.step(super::MenuNav { down: true, ..Default::default() }, 2);
+        assert_eq!(focus.selected(), Some(1));
+    }
+
+    /// Up from nothing lands on the last item, which is what a player expects
+    /// from pressing up on a fresh menu.
+    #[test]
+    fn up_from_nothing_lands_on_the_last_item() {
+        let mut focus = super::MenuFocus::default();
+        focus.step(super::MenuNav { up: true, ..Default::default() }, 2);
+        assert_eq!(focus.selected(), Some(1));
+    }
+
+    /// Wrapping at both ends. A menu of two with a stick in your hand is
+    /// exactly where an unwrapped list feels broken.
+    #[test]
+    fn the_selection_wraps_at_both_ends() {
+        let mut focus = super::MenuFocus::default();
+        focus.step(super::MenuNav { down: true, ..Default::default() }, 2);
+        focus.step(super::MenuNav { down: true, ..Default::default() }, 2);
+        focus.step(super::MenuNav { down: true, ..Default::default() }, 2);
+        assert_eq!(focus.selected(), Some(0), "past the end wraps to the start");
+        focus.step(super::MenuNav { up: true, ..Default::default() }, 2);
+        assert_eq!(focus.selected(), Some(1), "and back off the start wraps to the end");
+    }
+
+    /// The pointer takes the highlight back, so the two never disagree about
+    /// what confirm would do.
+    #[test]
+    fn hovering_hands_control_back_to_the_mouse() {
+        let mut focus = super::MenuFocus::default();
+        focus.step(super::MenuNav { down: true, ..Default::default() }, 2);
+        assert!(focus.selected().is_some());
+        focus.disengage();
+        assert_eq!(focus.selected(), None);
+    }
+
+    /// An empty menu must not panic or divide by zero — a menu built from a
+    /// filtered list can be empty, and this is cheaper than every caller
+    /// remembering.
+    #[test]
+    fn an_empty_menu_is_inert() {
+        let mut focus = super::MenuFocus::default();
+        focus.step(super::MenuNav { down: true, ..Default::default() }, 0);
+        assert_eq!(focus.selected(), None);
+    }
+
     /// **An untested menu is one nobody knows is drawn.** Same technique as
     /// the shadow test above: lay it out through a real `egui::Context` with
     /// no window anywhere, and read the shapes that came out.
@@ -1356,7 +1500,7 @@ mod tests {
         let mut scrims = 0;
         for _ in 0..2 {
             let out = ctx.run_ui(input.clone(), |root| {
-                let _ = pause_menu(root);
+                let _ = pause_menu(root, MenuNav::default(), &mut MenuFocus::default());
             });
             labels = Vec::new();
             scrims = 0;
@@ -1406,7 +1550,7 @@ mod tests {
         for _ in 0..2 {
             let out = ctx.run_ui(input.clone(), |root| {
                 title_scrim(root);
-                let _ = title_menu(root);
+                let _ = title_menu(root, MenuNav::default(), &mut MenuFocus::default());
                 fade(root, 1.0);
             });
             labels = Vec::new();
@@ -1468,7 +1612,7 @@ mod tests {
         for _ in 0..2 {
             let _ = ctx.run_ui(input.clone(), |root| {
                 title_scrim(root);
-                let _ = title_menu(root);
+                let _ = title_menu(root, MenuNav::default(), &mut MenuFocus::default());
                 fade(root, 0.4);
             });
             claimed = ctx.is_pointer_over_egui();
