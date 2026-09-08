@@ -47,6 +47,9 @@ pub const TOOLS: &[(&str, &str)] = &[
     // what somebody typed into its Agent panel; these read it and answer.
     ("agent_inbox", "loom agent inbox"),
     ("agent_reply", "loom agent reply"),
+    // Offering a change instead of making one, for when nobody is watching the
+    // screen. ADR 0103.
+    ("agent_propose", "loom agent propose"),
 ];
 
 #[cfg(test)]

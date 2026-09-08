@@ -707,6 +707,8 @@ struct App {
     /// The conversation with the agent, re-read whenever the scene is polled —
     /// ADR 0100.
     agent_chat: Vec<loom_editor::AgentTurn>,
+    /// Changes the agent has offered and nobody has decided — ADR 0103.
+    agent_proposals: Vec<loom_editor::panels::AgentProposal>,
     /// True while something we asked has no answer yet.
     agent_busy: bool,
     /// Rotation rings in window pixels, recomputed with the handles so a press
@@ -974,6 +976,7 @@ impl App {
             last_pick: None,
             renaming: None,
             agent_chat: Vec::new(),
+            agent_proposals: Vec::new(),
             agent_busy: false,
             rings: Vec::new(),
             planes: Vec::new(),
@@ -2024,6 +2027,7 @@ impl ApplicationHandler for App {
                     draw_ms: self.draw_ms,
                     agent_log: &agent_log,
                     agent_chat: &self.agent_chat,
+                    agent_proposals: &self.agent_proposals,
                     agent_busy: self.agent_busy,
                     redo_history: self
                         .session
@@ -2609,6 +2613,7 @@ impl App {
             UiAction::CreatePrimitive(shape) => self.create_primitive(&shape),
             UiAction::OpenScene(path) => self.open_scene(&path),
             UiAction::SendToAgent(text) => self.ask_agent(&text),
+            UiAction::DecideProposal { id, apply } => self.decide_proposal(id, apply),
             UiAction::DropAsset { alias, at } => self.drop_asset(&alias, at),
             UiAction::NewScene => self.new_scene(),
             UiAction::SaveAs(name) => self.save_as(&name),
@@ -4266,6 +4271,72 @@ impl App {
                 about: m.about,
             })
             .collect();
+        self.agent_proposals = crate::agent_link::undecided(&self.scene_path)
+            .into_iter()
+            .filter_map(|m| {
+                let offer = m.proposal?;
+                Some(loom_editor::panels::AgentProposal {
+                    id: m.id,
+                    text: m.text,
+                    diff: offer.diff,
+                })
+            })
+            .collect();
+    }
+
+    /// Apply or throw away a change the agent offered — ADR 0103.
+    ///
+    /// **Apply goes through `transact`, like everything else.** The proposal
+    /// file is a place to keep a transaction until somebody says yes; it is not
+    /// a second way into the scene. So the stored ops are deserialised and
+    /// handed to the one write path, which means the same validation, one
+    /// History entry, and one Ctrl+Z.
+    fn decide_proposal(&mut self, id: u64, apply: bool) {
+        if apply {
+            let Some(offer) = crate::agent_link::undecided(&self.scene_path)
+                .into_iter()
+                .find(|m| m.id == id)
+                .and_then(|m| m.proposal)
+            else {
+                crate::log::warn(format!("proposal {id} is no longer on the table"));
+                return;
+            };
+            // **Only the ops travel, and a stale proposal is still meaningful.**
+            // A stored `expect_version` was taken when the agent wrote the
+            // offer, and the human has been editing since — checking it would
+            // refuse a change they are looking at and want. That is safe here
+            // and would not be in every editor: a `SceneOp` writes an absolute
+            // value, never a delta, so applying one late says exactly what it
+            // said when it was written. An op that no longer makes sense — a
+            // node since deleted — is refused by the same validation as any
+            // other transaction, in `transact`.
+            let ops: Vec<loom_scene::SceneOp> = match offer
+                .transaction
+                .get("ops")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+            {
+                Ok(Some(ops)) => ops,
+                Ok(None) => Vec::new(),
+                Err(e) => {
+                    crate::log::error(format!("that proposal will not parse: {e}"));
+                    return;
+                }
+            };
+            let label = offer
+                .transaction
+                .get("label")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("agent proposal")
+                .to_owned();
+            self.transact(label, ops);
+        }
+        let decision = if apply { "applied" } else { "discarded" };
+        if let Err(e) = crate::agent_link::decide(&self.scene_path, id, decision) {
+            crate::log::error(format!("could not record the decision: {e}"));
+        }
+        self.refresh_agent_chat();
     }
 
     /// Where a game saved from the editor lands — ADR 0098.

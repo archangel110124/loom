@@ -22,6 +22,24 @@
 //!
 //! One line of JSON per message, appended and never rewritten, so a reader and
 //! a writer cannot corrupt each other without a lock.
+//!
+//! # Proposals
+//!
+//! An agent may answer with a **change instead of a sentence**: the same
+//! transaction it would have applied, carried in the reply along with the diff
+//! it produced under `--dry-run`. The editor shows the diff with Apply and
+//! Discard, and Apply runs it through the ordinary op path — one History entry,
+//! one Ctrl+Z, the same validation. Nothing new can reach the scene through
+//! this file; it only decides *when* something reaches it.
+//!
+//! This exists because the loop is asynchronous by design. The human asks and
+//! goes back to work, and an edit that lands unseen is one they discover by
+//! noticing the scene changed. A proposal is the same edit with the human's
+//! eyes in front of it, which is the difference between an assistant and a
+//! process running in their file.
+//!
+//! The decision is recorded as a **human line in the inbox** — the same file
+//! their questions go in, because accepting a change is a thing the human did.
 
 use std::path::{Path, PathBuf};
 
@@ -44,6 +62,23 @@ pub struct Message {
     /// What was selected when the human sent it — the difference between
     /// "make it sit lower" meaning something and meaning nothing.
     pub about: Vec<String>,
+    /// A change offered rather than made, if this turn carries one.
+    pub proposal: Option<Proposal>,
+    /// The human's answer to a proposal: `applied` or `discarded`. Only ever
+    /// set on a human turn, and only on one that names an earlier id.
+    pub decision: Option<String>,
+}
+
+/// A change an agent is offering, waiting on the human.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Proposal {
+    /// The transaction, exactly as `loom scene --tx` would take it. Stored
+    /// whole rather than as a summary, because the thing shown and the thing
+    /// applied have to be the same thing.
+    pub transaction: serde_json::Value,
+    /// What it would do, from a `--dry-run`. Cached so the editor can show it
+    /// without re-running anything, and so a proposal is readable in the file.
+    pub diff: Vec<String>,
 }
 
 /// Where the conversation for a scene lives.
@@ -89,6 +124,23 @@ fn read(path: &Path, speaker: Speaker) -> Vec<Message> {
                             .collect()
                     })
                     .unwrap_or_default(),
+                proposal: value.get("tx").map(|transaction| Proposal {
+                    transaction: transaction.clone(),
+                    diff: value
+                        .get("diff")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|lines| {
+                            lines
+                                .iter()
+                                .filter_map(|v| v.as_str().map(str::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                }),
+                decision: value
+                    .get("decision")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
             })
         })
         .collect()
@@ -136,6 +188,61 @@ pub fn reply(scene: &Path, id: u64, text: &str) -> std::io::Result<()> {
     append(&outbox(scene), &serde_json::json!({ "id": id, "text": text }))
 }
 
+/// Answer with a change instead of a sentence.
+///
+/// `transaction` is what `loom scene --tx` would take, and `diff` is what it
+/// said under `--dry-run`. Both are stored: the editor shows the diff, and Apply
+/// runs the transaction, so what was shown and what runs came from one place.
+///
+/// # Errors
+/// If the line cannot be appended.
+pub fn propose(
+    scene: &Path,
+    id: u64,
+    text: &str,
+    transaction: &serde_json::Value,
+    diff: &[String],
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory(scene))?;
+    append(
+        &outbox(scene),
+        &serde_json::json!({ "id": id, "text": text, "tx": transaction, "diff": diff }),
+    )
+}
+
+/// Record what the human did with a proposal.
+///
+/// **A human line, in the human's file.** Accepting a change is something the
+/// person did, and putting it anywhere else would make the inbox a partial
+/// record of their side.
+///
+/// # Errors
+/// If the line cannot be appended.
+pub fn decide(scene: &Path, id: u64, decision: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory(scene))?;
+    append(
+        &inbox(scene),
+        &serde_json::json!({ "id": id, "decision": decision }),
+    )
+}
+
+/// Proposals the human has neither applied nor discarded.
+///
+/// **What the editor puts buttons under.** A proposal whose decision line is
+/// present is history; one without is a question still on the table.
+#[must_use]
+pub fn undecided(scene: &Path) -> Vec<Message> {
+    let decided: std::collections::BTreeSet<u64> = read(&inbox(scene), Speaker::Human)
+        .into_iter()
+        .filter(|m| m.decision.is_some())
+        .map(|m| m.id)
+        .collect();
+    read(&outbox(scene), Speaker::Agent)
+        .into_iter()
+        .filter(|m| m.proposal.is_some() && !decided.contains(&m.id))
+        .collect()
+}
+
 /// Requests with no reply yet — what an agent should work on.
 #[must_use]
 pub fn pending(scene: &Path) -> Vec<Message> {
@@ -145,7 +252,9 @@ pub fn pending(scene: &Path) -> Vec<Message> {
         .collect();
     read(&inbox(scene), Speaker::Human)
         .into_iter()
-        .filter(|m| !answered.contains(&m.id))
+        // A decision line is the human answering the agent, not asking. Left in
+        // it would come back forever as a request with no text.
+        .filter(|m| m.decision.is_none() && !answered.contains(&m.id))
         .collect()
 }
 
@@ -200,6 +309,43 @@ mod tests {
         let waiting = pending(&scene);
         assert_eq!(waiting.len(), 1, "{waiting:?}");
         assert_eq!(waiting[0].id, second);
+    }
+
+    /// **A change offered, then taken.** What is shown and what is applied come
+    /// out of one line, and once decided it stops asking.
+    #[test]
+    fn a_proposal_waits_until_it_is_decided() {
+        let scene = scene("propose");
+        let id = ask(&scene, "heavier fog", &[]).expect("ask");
+        let tx = serde_json::json!({
+            "label": "Fog to 0.012",
+            "ops": [{ "op": "set_field", "node": "Rig", "field": "Environment.fog_density", "value": 0.012 }],
+        });
+        propose(&scene, id, "here is what I would change", &tx, &["-fog_density = 0.0028".to_owned()])
+            .expect("propose");
+
+        let waiting = undecided(&scene);
+        assert_eq!(waiting.len(), 1, "{waiting:?}");
+        let offered = waiting[0].proposal.as_ref().expect("carries a transaction");
+        assert_eq!(offered.transaction, tx, "the stored transaction is the one to run");
+        assert_eq!(offered.diff.len(), 1);
+
+        decide(&scene, id, "applied").expect("decide");
+        assert!(undecided(&scene).is_empty(), "a decided proposal stops asking");
+    }
+
+    /// **A decision is not a new request.** It goes in the inbox, which is also
+    /// where questions live, so `pending` has to tell them apart or the agent
+    /// picks up an empty request and answers it forever.
+    #[test]
+    fn a_decision_is_not_mistaken_for_a_question() {
+        let scene = scene("decision");
+        let id = ask(&scene, "heavier fog", &[]).expect("ask");
+        propose(&scene, id, "proposed", &serde_json::json!({ "label": "x", "ops": [] }), &[])
+            .expect("propose");
+        decide(&scene, id, "discarded").expect("decide");
+
+        assert!(pending(&scene).is_empty(), "{:?}", pending(&scene));
     }
 
     /// A scene nobody has spoken to is quiet, not an error.

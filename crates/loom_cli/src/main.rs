@@ -103,6 +103,16 @@ USAGE:
         Same file, same ids, so a request typed here and one typed in the editor
         are indistinguishable to whoever answers. --about is what was selected.
 
+    loom agent propose <scene.loom> --id <n> --tx <tx.json> [--text <...>]
+        Answer with a change instead of a sentence. The transaction is dry-run
+        first — a proposal that cannot apply is refused here rather than under
+        the human's finger — and the diff is stored with it, so the editor shows
+        exactly what Apply will run. Nothing reaches the scene until they say so.
+
+    loom agent decide <scene.loom> --id <n> --decision applied|discarded
+        What the human did with a proposal. The editor's Apply and Discard write
+        this; it is here so the loop can be driven without a window.
+
     loom pack <assets-dir> <out.pack>
         Fold an asset tree into one file. A binary with `assets.pack` beside it
         reads from it instead of the tree, so a shipped game is one archive
@@ -313,7 +323,13 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
             ("--size", true), ("--steps", true),
         ],
     ),
-    ("agent", &[("--id", true), ("--text", true), ("--about", true)]),
+    (
+        "agent",
+        &[
+            ("--id", true), ("--text", true), ("--about", true),
+            ("--tx", true), ("--decision", true),
+        ],
+    ),
     ("run", &[
         ("--edit", false), ("--frames", true), ("--play", false),
         ("--shot", true), ("--hold", true), ("--menu", false),
@@ -429,6 +445,8 @@ fn run(args: &[String]) -> (u8, String) {
             (Some("inbox"), Some(scene)) => agent_inbox(scene),
             (Some("reply"), Some(scene)) => agent_reply(scene, args),
             (Some("ask"), Some(scene)) => agent_ask(scene, args),
+            (Some("propose"), Some(scene)) => agent_propose(scene, args),
+            (Some("decide"), Some(scene)) => agent_decide(scene, args),
             _ => (2, USAGE.to_owned()),
         },
         Some("pack") => match (args.get(1), args.get(2)) {
@@ -6736,6 +6754,106 @@ fn agent_ask(scene: &str, args: &[String]) -> (u8, String) {
     }
 }
 
+/// Offer a change rather than making one — ADR 0103.
+///
+/// **Dry-run first, always.** A proposal the human can see but not apply is
+/// worse than no proposal: they click Apply, it fails, and the failure is the
+/// agent's mistake surfacing in their hands. So the transaction goes through the
+/// real op path with `dry_run` forced on, and only a diff that came back is
+/// worth showing.
+fn agent_propose(scene: &str, args: &[String]) -> (u8, String) {
+    let Some(id) = flag(args, "--id").and_then(|v| v.parse::<u64>().ok()) else {
+        return (
+            2,
+            json_line(&serde_json::json!({
+                "error": "missing_flag", "value": "--id",
+                "constraint": "the id of the request this answers",
+            })),
+        );
+    };
+    let Some(tx_path) = flag(args, "--tx") else {
+        return (
+            2,
+            json_line(&serde_json::json!({
+                "error": "missing_flag", "value": "--tx",
+                "constraint": "the transaction being offered",
+            })),
+        );
+    };
+    let tx_text = match std::fs::read_to_string(&tx_path) {
+        Ok(text) => text,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "io_error", "path": tx_path, "constraint": e.to_string(),
+        }))),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&tx_text) {
+        Ok(v) => v,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "invalid_transaction", "constraint": e.to_string(),
+        }))),
+    };
+    let mut transaction: loom_scene::Transaction = match serde_json::from_value(value.clone()) {
+        Ok(t) => t,
+        Err(e) => return (2, json_line(&serde_json::json!({
+            "error": "invalid_transaction",
+            "constraint": e.to_string(),
+            "hint": "Expected { \"label\": \"...\", \"ops\": [ { \"op\": \"spawn_node\", ... } ] }",
+        }))),
+    };
+    transaction.dry_run = true;
+    let diff = match loom_scene::apply_to_file(std::path::Path::new(scene), &transaction) {
+        Ok(applied) => applied.diff,
+        Err(e) => return file_apply_error(scene, &e),
+    };
+    let text = flag(args, "--text").unwrap_or_default();
+    match agent_link::propose(std::path::Path::new(scene), id, &text, &value, &diff) {
+        Ok(()) => (
+            0,
+            json_line(&serde_json::json!({ "proposed": id, "diff": diff })),
+        ),
+        Err(e) => (
+            1,
+            json_line(&serde_json::json!({
+                "error": "io_error", "path": scene, "constraint": e.to_string(),
+            })),
+        ),
+    }
+}
+
+/// What the human did with a proposal — ADR 0103.
+fn agent_decide(scene: &str, args: &[String]) -> (u8, String) {
+    let Some(id) = flag(args, "--id").and_then(|v| v.parse::<u64>().ok()) else {
+        return (
+            2,
+            json_line(&serde_json::json!({
+                "error": "missing_flag", "value": "--id",
+                "constraint": "the proposal being decided",
+            })),
+        );
+    };
+    // **Two words, and nothing else.** A free-text decision would read back as
+    // undecided-but-not-really, and `undecided` would have to guess.
+    let decision = flag(args, "--decision").unwrap_or_default();
+    if decision != "applied" && decision != "discarded" {
+        return (
+            2,
+            json_line(&serde_json::json!({
+                "error": "unknown_flag_value", "value": decision,
+                "constraint": "--decision is `applied` or `discarded`",
+            })),
+        );
+    }
+    match agent_link::decide(std::path::Path::new(scene), id, &decision) {
+        Ok(()) => (0, json_line(&serde_json::json!({ "decided": id, "decision": decision }))),
+        Err(e) => (
+            1,
+            json_line(&serde_json::json!({
+                "error": "io_error", "path": scene, "constraint": e.to_string(),
+            })),
+        ),
+    }
+}
+
 /// Answer one of them — ADR 0100.
 fn agent_reply(scene: &str, args: &[String]) -> (u8, String) {
     let Some(id) = flag(args, "--id").and_then(|v| v.parse::<u64>().ok()) else {
@@ -8834,6 +8952,42 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["error"], "unknown_flag");
         assert_eq!(v["value"], "--frame");
+    }
+
+    /// **A proposal that cannot apply is refused where the agent is, not where
+    /// the human is.** Otherwise they read a diff, press Apply, and the failure
+    /// arrives in their hands as though they had caused it. Nothing is written
+    /// to the conversation either — an offer that would fail is not an offer.
+    #[test]
+    fn a_proposal_that_would_not_apply_is_refused() {
+        let dir = std::env::temp_dir().join("loom-propose-refusal");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let scene = dir.join("scene.loom");
+        std::fs::write(&scene, "[scene]\nformat = 1\n\n[[node]]\nname = \"A\"\n").expect("scene");
+        let tx = dir.join("tx.json");
+        std::fs::write(
+            &tx,
+            r#"{"label":"move a node that is not there",
+                "ops":[{"op":"set_transform","node":"Nope","pos":[1.0,0.0,0.0]}]}"#,
+        )
+        .expect("tx");
+
+        let (code, out) = run(&args(&[
+            "agent",
+            "propose",
+            &scene.to_string_lossy(),
+            "--id",
+            "1",
+            "--tx",
+            &tx.to_string_lossy(),
+        ]));
+
+        assert_eq!(code, 1, "a rejected transaction is exit 1: {out}");
+        assert!(
+            !dir.join(".loom-agent").exists(),
+            "a refused proposal must not reach the conversation"
+        );
     }
 
     /// **A sibling whose name starts with yours is not under you.** `Rig/Boat`

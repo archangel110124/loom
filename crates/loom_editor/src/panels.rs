@@ -62,6 +62,10 @@ pub enum UiAction {
     OpenScene(String),
     /// Ask the agent for something — ADR 0100.
     SendToAgent(String),
+    /// Apply or throw away a change the agent offered rather than made —
+    /// ADR 0103. Apply runs the stored transaction through the ordinary op
+    /// path, so it is one History entry and one Ctrl+Z like any other edit.
+    DecideProposal { id: u64, apply: bool },
     /// Drop an asset into the viewport at these window pixels — ADR 0099.
     ///
     /// The alias, and where the cursor let go. The caller turns the point into
@@ -176,6 +180,19 @@ pub struct AgentTurn {
     pub about: Vec<String>,
 }
 
+/// A change the agent is offering, waiting on a human — ADR 0103.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentProposal {
+    /// The id of the request it answers, and the handle Apply sends back.
+    pub id: u64,
+    /// What the agent said about it.
+    pub text: String,
+    /// What it would do, from a dry-run. Shown verbatim: a summary of a diff is
+    /// a second thing to get wrong, and the human is being asked to approve the
+    /// diff, not a description of it.
+    pub diff: Vec<String>,
+}
+
 /// One edit somebody else made to the scene — ADR 0093.
 ///
 /// **The marks over the viewport fade after six seconds**, which is right for
@@ -246,6 +263,8 @@ pub struct PanelState<'a> {
     pub agent_chat: &'a [AgentTurn],
     /// True while a request of ours has no answer yet.
     pub agent_busy: bool,
+    /// Changes offered and not yet decided, oldest first — ADR 0103.
+    pub agent_proposals: &'a [AgentProposal],
     /// Labels of transactions that were undone and can be redone, newest last.
     pub redo_history: &'a [String],
     /// The selection's bounding box, as screen-space edges — ADR 0099.
@@ -1491,6 +1510,89 @@ pub(crate) fn agent(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec
     });
     ui.separator();
 
+    // **Offered, not made** — ADR 0103. An edit that lands while the human is
+    // elsewhere is one they discover by noticing the scene changed. These are
+    // waiting on them, so they come first, above the conversation.
+    //
+    // **The buttons sit above the diff, not below it.** With them last, a short
+    // panel pushed Apply off the bottom edge — the one control the block exists
+    // for, invisible, in the first screenshot of it. One scroll area for the
+    // whole block and none inside it: a scroll area nested in a scroll area
+    // eats the wheel at whichever one the pointer happens to be over.
+    if !state.agent_proposals.is_empty() {
+        egui::ScrollArea::vertical()
+            .id_salt("agent_proposals")
+            .max_height(240.0)
+            .show(ui, |ui| {
+                for offer in state.agent_proposals {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.colored_label(crate::theme::tokens(false).agent, "proposed");
+                            ui.label(&offer.text);
+                        });
+                        ui.horizontal(|ui| {
+                            // Apply is gated by the same rule as every other
+                            // structural edit: a transaction against the
+                            // authored scene means nothing while a simulation
+                            // is running on top of it.
+                            let allowed = structure_editable(state);
+                            if ui
+                                .add_enabled(allowed, egui::Button::new("Apply"))
+                                .on_disabled_hover_text(
+                                    "stop the game first — this edits the authored scene",
+                                )
+                                .clicked()
+                            {
+                                actions.push(UiAction::DecideProposal {
+                                    id: offer.id,
+                                    apply: true,
+                                });
+                            }
+                            if ui.button("Discard").clicked() {
+                                actions.push(UiAction::DecideProposal {
+                                    id: offer.id,
+                                    apply: false,
+                                });
+                            }
+                            ui.weak("Ctrl+Z undoes it like any other edit");
+                        });
+                        if offer.diff.is_empty() {
+                            ui.weak("no change — the scene already reads that way");
+                        } else {
+                            // Shown verbatim: a summary of a diff is a second
+                            // thing to get wrong, and the human is approving
+                            // the diff rather than a description of it. Long
+                            // ones are cut with the count said out loud, never
+                            // silently.
+                            const SHOWN: usize = 24;
+                            for line in offer.diff.iter().take(SHOWN) {
+                                let colour = match line.as_bytes().first() {
+                                    Some(b'+') => crate::theme::tokens(false).ok,
+                                    Some(b'-') => crate::theme::tokens(false).error,
+                                    _ => crate::theme::tokens(false).text_weak,
+                                };
+                                ui.colored_label(
+                                    colour,
+                                    egui::RichText::new(line).monospace(),
+                                );
+                            }
+                            if offer.diff.len() > SHOWN {
+                                ui.weak(format!(
+                                    "… and {} more line(s) — `loom scene --tx --dry-run` \
+                                     prints the whole diff",
+                                    offer.diff.len() - SHOWN
+                                ));
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+    }
+    if !state.agent_proposals.is_empty() {
+        ui.separator();
+    }
+
     if !state.agent_chat.is_empty() {
         egui::ScrollArea::vertical()
             .id_salt("agent_chat")
@@ -2656,6 +2758,7 @@ mod tests {
             open_scene: "",
             agent_log: &[],
             agent_chat: &[],
+            agent_proposals: &[],
             agent_busy: false,
             renaming: None,
             redo_history: &[],
@@ -2723,6 +2826,7 @@ mod tests {
             open_scene: "",
             agent_log: &[],
             agent_chat: &[],
+            agent_proposals: &[],
             agent_busy: false,
             renaming: None,
             redo_history: &[],

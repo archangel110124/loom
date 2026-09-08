@@ -72,15 +72,32 @@ what I changed and what I left alone.
 
 ## When you are away
 
+If nobody is watching the screen, I can offer the change instead of making it:
+
+```
+loom agent propose <scene> --id <n> --tx tx.json --text "what and why"
+```
+
+The Agent panel then shows the diff with **Apply** and **Discard**, and nothing
+touches the scene until you press one. Apply runs the same transaction through
+the same op path, so it is one Ctrl+Z and one History entry like anything you
+did yourself. A proposal that could not apply is refused when I make it, not
+when you press the button. ADR 0103.
+
+Directly applying is still the right thing when you are sitting there — that is
+the tighter loop, and it is why the editor polls the file at all.
+
+## Queueing
+
 Requests queue. `loom agent inbox` returns everything unanswered, so a session
 that starts hours later picks up where you left off — the ids are stable and
 the transcript is the whole history.
 
 ## What this does not do yet
 
-- **No approval step.** My edits land and are undoable, rather than waiting for
-  you to accept them. A propose-review-accept flow would use the dry-run diff
-  `loom scene --tx --dry-run` already produces, and is the obvious next thing.
+- **Nothing is a two-way conversation about one change.** A proposal is offered
+  once and you accept or throw it away; there is no "not like that, more like
+  this" on the same offer. Ask again.
 - **Nothing answers automatically.** The editor writes a request; something has
   to be watching. That is a session of mine, not a daemon.
 - **A transform edit during Play will not stick** — the snapshot restores where
