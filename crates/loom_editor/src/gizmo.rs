@@ -250,6 +250,90 @@ pub fn rings(view: &View, origin: Vec3) -> Vec<(usize, Vec<(f32, f32)>)> {
     out
 }
 
+/// A quad between two axes, for moving in that plane — ADR 0099.
+///
+/// **Most placement is two-dimensional.** Sliding a crate along the deck is a
+/// move in XZ, and doing it with two separate axis drags is two gestures and
+/// two chances to nudge the height by accident.
+pub struct Plane {
+    /// The two axes this quad spans.
+    pub axes: (usize, usize),
+    /// Its corners in window pixels, in order round the quad.
+    pub corners: [(f32, f32); 4],
+}
+
+/// How far along each handle a plane quad sits, and how big it is. Near the
+/// origin so it does not swallow the axis caps.
+const PLANE_NEAR: f32 = 0.26;
+const PLANE_FAR: f32 = 0.62;
+
+/// The three plane quads, built from the axis handles — ADR 0099.
+///
+/// Derived from the handles rather than re-projected, so a plane and its two
+/// axes cannot disagree about where they are or how the drag is geared.
+#[must_use]
+pub fn planes(handles: &[Handle]) -> Vec<Plane> {
+    let mut out = Vec::new();
+    for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+        let (Some(a), Some(b)) = (
+            handles.iter().find(|h| h.axis == i),
+            handles.iter().find(|h| h.axis == j),
+        ) else {
+            continue;
+        };
+        let origin = a.origin;
+        let along = |h: &Handle, t: f32| {
+            (
+                origin.0 + (h.tip.0 - origin.0) * t,
+                origin.1 + (h.tip.1 - origin.1) * t,
+            )
+        };
+        let (an, af) = (along(a, PLANE_NEAR), along(a, PLANE_FAR));
+        let (bn, bf) = (along(b, PLANE_NEAR), along(b, PLANE_FAR));
+        // The parallelogram those two spans make.
+        let corner = |p: (f32, f32), q: (f32, f32)| {
+            (p.0 + q.0 - origin.0, p.1 + q.1 - origin.1)
+        };
+        out.push(Plane {
+            axes: (i, j),
+            corners: [
+                corner(an, bn),
+                corner(af, bn),
+                corner(af, bf),
+                corner(an, bf),
+            ],
+        });
+    }
+    out
+}
+
+/// Which plane quad the cursor is inside, if any — ADR 0099.
+#[must_use]
+pub fn grab_plane(planes: &[Plane], cursor: (f32, f32)) -> Option<(usize, usize)> {
+    planes
+        .iter()
+        .find(|plane| inside(&plane.corners, cursor))
+        .map(|plane| plane.axes)
+}
+
+/// Whether a point is inside a convex quad, by consistent turn direction.
+fn inside(corners: &[(f32, f32); 4], point: (f32, f32)) -> bool {
+    let mut positive = false;
+    let mut negative = false;
+    for i in 0..4 {
+        let a = corners[i];
+        let b = corners[(i + 1) % 4];
+        let cross = (b.0 - a.0) * (point.1 - a.1) - (b.1 - a.1) * (point.0 - a.0);
+        if cross > 0.0 {
+            positive = true;
+        } else if cross < 0.0 {
+            negative = true;
+        }
+    }
+    // Inside a convex quad every edge turns the same way.
+    !(positive && negative)
+}
+
 /// Which way a ring turns for this viewpoint — ADR 0099.
 ///
 /// **A ring seen from behind runs the other way.** The sweep is measured on
@@ -419,6 +503,46 @@ pub fn snap(value: f32, step: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A plane quad has to contain its own middle and not the far side of
+    /// the screen.** A convex test that got the winding wrong would either
+    /// swallow every click in the viewport or none.
+    #[test]
+    fn a_plane_contains_its_centre_and_nothing_far_away() {
+        let handles = super::handles(&view(), Vec3::ZERO);
+        let planes = super::planes(&handles);
+        assert!(!planes.is_empty(), "at least one plane from three handles");
+        for plane in &planes {
+            let centre = (
+                plane.corners.iter().map(|c| c.0).sum::<f32>() / 4.0,
+                plane.corners.iter().map(|c| c.1).sum::<f32>() / 4.0,
+            );
+            assert_eq!(
+                super::grab_plane(std::slice::from_ref(plane), centre),
+                Some(plane.axes),
+                "a plane must contain its own centre"
+            );
+            assert_eq!(
+                super::grab_plane(std::slice::from_ref(plane), (-9000.0, -9000.0)),
+                None
+            );
+        }
+    }
+
+    /// Each plane spans two different axes, and the three cover all three.
+    #[test]
+    fn the_planes_span_the_three_axis_pairs() {
+        let handles = super::handles(&view(), Vec3::ZERO);
+        let planes = super::planes(&handles);
+        for plane in &planes {
+            assert_ne!(plane.axes.0, plane.axes.1, "a plane needs two axes");
+        }
+        let mut seen: Vec<(usize, usize)> = planes.iter().map(|p| p.axes).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), planes.len(), "no plane is repeated");
+    }
+
 
     /// **The bug a single viewpoint cannot see.** Cross the rotation plane and
     /// the same drag must still turn the object the way the hand went; without

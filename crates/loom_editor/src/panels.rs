@@ -60,6 +60,11 @@ pub enum UiAction {
     /// Open a different scene file — ADR 0093. Refused while there are
     /// unsaved edits.
     OpenScene(String),
+    /// Drop an asset into the viewport at these window pixels — ADR 0099.
+    ///
+    /// The alias, and where the cursor let go. The caller turns the point into
+    /// a place in the world; a panel has no camera.
+    DropAsset { alias: String, at: (f32, f32) },
     /// Start a new scene beside this one, named by the editor — ADR 0099.
     NewScene,
     /// Write the scene to another name beside this one — ADR 0099.
@@ -216,6 +221,8 @@ pub struct PanelState<'a> {
     pub selection_edges: &'a [Segment],
     /// Rotation rings in window pixels, drawn in Rotate mode — ADR 0099.
     pub rings: &'a [(usize, Vec<(f32, f32)>)],
+    /// Plane quads, drawn in Move mode — ADR 0099.
+    pub planes: &'a [crate::gizmo::Plane],
     /// Gizmo handles in **window pixels**, as the viewport computed them.
     pub handles: &'a [Handle],
     /// The **axis** being dragged, so its handle can be drawn as grabbed.
@@ -947,12 +954,19 @@ pub(crate) fn assets(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Ve
                         );
                     continue;
                 }
+                // **Draggable into the viewport, clickable onto the
+                // selection.** Placing a mesh was select-a-node-then-assign,
+                // which is a tools programmer's flow; dragging it into the
+                // world is what an artist reaches for.
                 let enabled = state.editable && !state.selected.is_empty();
-                if ui
-                    .add_enabled(enabled, egui::Button::new(format!("◻ {asset}")))
-                    .on_hover_text("assign to the selection")
-                    .clicked()
-                {
+                let id = egui::Id::new(("asset", asset));
+                let response = ui
+                    .dnd_drag_source(id, asset.clone(), |ui| {
+                        ui.add_enabled(enabled, egui::Button::new(format!("◻ {asset}")));
+                    })
+                    .response
+                    .on_hover_text("drag into the viewport, or click to assign to the selection");
+                if response.clicked() && enabled {
                     actions.push(UiAction::AssignMesh(asset.clone()));
                 }
             }
@@ -1555,6 +1569,32 @@ pub(crate) fn gizmo_overlay(
         painter.set_clip_rect(rect);
     }
     let point = |(x, y): (f32, f32)| egui::pos2(x / scale, y / scale);
+
+    // **The planes under the axes**, filled faintly so they read as a surface
+    // rather than another line, and tinted by the two axes they span.
+    for plane in state.planes {
+        let (a, b) = plane.axes;
+        let blend = |x: u8, y: u8| u8::try_from((u16::from(x) + u16::from(y)) / 2).unwrap_or(x);
+        let (ca, cb) = (AXIS_COLORS[a], AXIS_COLORS[b]);
+        let tint = egui::Color32::from_rgba_unmultiplied(
+            blend(ca.r(), cb.r()),
+            blend(ca.g(), cb.g()),
+            blend(ca.b(), cb.b()),
+            // Faint enough to read as a surface, solid enough to aim at. At
+            // 56 it was invisible against a lit scene.
+            110,
+        );
+        let corners: Vec<egui::Pos2> = plane.corners.iter().map(|c| point(*c)).collect();
+        painter.add(egui::Shape::convex_polygon(
+            corners,
+            tint,
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(
+                blend(ca.r(), cb.r()),
+                blend(ca.g(), cb.g()),
+                blend(ca.b(), cb.b()),
+            )),
+        ));
+    }
 
     // **The rings first, under the handles.** In Rotate mode they are the
     // thing you aim at; the axis caps still sit on top so the colours agree.
@@ -2365,6 +2405,7 @@ mod tests {
             redo_history: &[],
             selection_edges: &[],
             rings: &[],
+            planes: &[],
             handles: &[],
             dragging: None,
             fps: 60.0,
@@ -2427,6 +2468,7 @@ mod tests {
             redo_history: &[],
             selection_edges: &[],
             rings: &[],
+            planes: &[],
             handles: &[],
             dragging: None,
             fps: 60.0,

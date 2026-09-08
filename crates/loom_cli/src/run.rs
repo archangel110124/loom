@@ -608,6 +608,8 @@ struct Drag {
     ring: bool,
     /// Which way that ring turns from where the camera was — ADR 0099.
     sign: f32,
+    /// The second axis, when the press landed on a plane quad — ADR 0099.
+    also: Option<gizmo::Handle>,
 }
 
 struct App {
@@ -701,6 +703,8 @@ struct App {
     /// Rotation rings in window pixels, recomputed with the handles so a press
     /// hit-tests exactly what was drawn — ADR 0099.
     rings: Vec<(usize, Vec<(f32, f32)>)>,
+    /// Plane quads, for moving in two axes at once — ADR 0099.
+    planes: Vec<gizmo::Plane>,
     /// What is wrong with the scene, recomputed on change — ADR 0093.
     problems: Vec<loom_editor::Problem>,
     /// Every edit from outside this window, newest last — ADR 0093.
@@ -958,6 +962,7 @@ impl App {
             collapsed: std::collections::BTreeSet::new(),
             last_pick: None,
             rings: Vec::new(),
+            planes: Vec::new(),
             clipboard: Vec::new(),
             scenes: Vec::new(),
             problems: Vec::new(),
@@ -1841,6 +1846,11 @@ impl ApplicationHandler for App {
                 // A ring at a constant size on screen — see `gizmo::rings`.
                 // Sizing it to the object put a circle bigger than the window
                 // across the whole viewport.
+                self.planes = if self.mode == Mode::Move {
+                    gizmo::planes(&self.handles)
+                } else {
+                    Vec::new()
+                };
                 self.rings = match (centre, self.mode) {
                     (Some(c), Mode::Rotate) => gizmo::rings(&projection, c),
                     _ => Vec::new(),
@@ -1968,6 +1978,7 @@ impl ApplicationHandler for App {
                     .collect();
                 let state = PanelState {
                     rings: &self.rings,
+                    planes: &self.planes,
                     selection_edges: &selection_edges,
                     snap: self.snap,
                     view_mode: self.view_mode,
@@ -2555,6 +2566,7 @@ impl App {
             UiAction::AddPrefabInstance(key) => self.add_prefab_instance(&key),
             UiAction::CreatePrimitive(shape) => self.create_primitive(&shape),
             UiAction::OpenScene(path) => self.open_scene(&path),
+            UiAction::DropAsset { alias, at } => self.drop_asset(&alias, at),
             UiAction::NewScene => self.new_scene(),
             UiAction::SaveAs(name) => self.save_as(&name),
             UiAction::Copy => self.copy_selection(),
@@ -3604,6 +3616,38 @@ impl App {
                 from_angle: gizmo::angle_about(centre, self.cursor),
                 ring: true,
                 sign: gizmo::ring_sign(&self.projection(), world_centre, axis),
+                also: None,
+            });
+            return;
+        }
+        // **A plane quad before the lines it sits between.** It is drawn on
+        // top and is the smaller target, so a press inside it means the plane.
+        if self.mode == Mode::Move
+            && let Some((first, second)) = gizmo::grab_plane(&self.planes, self.cursor)
+            && let Some(node) = self.focused()
+            && let Some(transform) = self.view.transform_of(&node)
+            && let Some(a) = self.handles.iter().find(|h| h.axis == first).cloned()
+            && let Some(b) = self.handles.iter().find(|h| h.axis == second).cloned()
+        {
+            let group = self
+                .selected
+                .iter()
+                .filter_map(|path| {
+                    let t = self.view.transform_of(path)?;
+                    Some((path.clone(), [t.pos, t.rot_euler, t.scale]))
+                })
+                .collect();
+            self.drag = Some(Drag {
+                centre: a.origin,
+                handle: a,
+                from: self.cursor,
+                start: [transform.pos, transform.rot_euler, transform.scale],
+                node,
+                group,
+                from_angle: 0.0,
+                ring: false,
+                sign: 1.0,
+                also: Some(b),
             });
             return;
         }
@@ -3630,6 +3674,7 @@ impl App {
                 from_angle: 0.0,
                 ring: false,
                 sign: 1.0,
+                also: None,
             });
             return;
         }
@@ -3680,6 +3725,11 @@ impl App {
                 // in the space the file is written in.
                 let mut world_delta = loom_render::glam::Vec3::ZERO;
                 world_delta[axis] = travelled;
+                // The plane's second axis, geared by its own handle — ADR 0099.
+                if let Some(other) = drag.also.as_ref() {
+                    world_delta[other.axis] =
+                        gizmo::drag_distance(other, drag.from, self.cursor);
+                }
                 let local_delta = self
                     .view
                     .parent_inverse(&node)
@@ -3949,6 +3999,60 @@ impl App {
         self.refresh_play_objects();
     }
 
+
+
+    /// Spawn a node with `alias` where the cursor let go — ADR 0099.
+    ///
+    /// **Placed where the ray lands, not at the origin.** Dropping a crate and
+    /// finding it at the world origin is not placement, it is a spawn button
+    /// with extra steps. The ray goes through whatever is already in the scene;
+    /// failing that it lands a few metres out, which is what an empty view
+    /// deserves.
+    fn drop_asset(&mut self, alias: &str, at: (f32, f32)) {
+        if self.session.is_none() || self.play.is_some() {
+            return;
+        }
+        let projection = self.projection();
+        let dir = projection.ray(at.0, at.1);
+        let eye = projection.eye();
+
+        let hit = self
+            .view
+            .picks
+            .values()
+            .filter_map(|bounds| ray_box(eye, dir, bounds))
+            .min_by(f32::total_cmp);
+        let point = eye + dir * hit.unwrap_or(8.0);
+
+        // Under the selection when there is one, so dropping into a rig keeps
+        // it in the rig — the same rule paste follows.
+        let parent = self.selected.first().cloned().unwrap_or_default();
+        let name = self.free_name(&parent, alias);
+        let path = if parent.is_empty() {
+            name.clone()
+        } else {
+            format!("{parent}/{name}")
+        };
+        let local = self
+            .view
+            .parent_inverse(&path)
+            .transform_point3(point)
+            .to_array();
+
+        self.transact(
+            format!("Drop {alias}"),
+            vec![
+                loom_scene::SceneOp::SpawnNode {
+                    parent,
+                    name,
+                    mesh: Some(alias.to_owned()),
+                    prefab: None,
+                },
+                transform_op(&path, Some(local), None, None),
+            ],
+        );
+        self.selected = vec![path];
+    }
 
     /// A scene id derived from where the file is — ADR 0099.
     ///

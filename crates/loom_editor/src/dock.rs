@@ -333,7 +333,7 @@ impl Dock {
                 .show_add_buttons(false)
                 .show_inside(&mut child, &mut shell);
         }
-        let actions = shell.actions;
+        let mut actions = shell.actions;
 
         let hole = shell.viewport.map(|rect| rect.intersect(area));
         match hole {
@@ -355,6 +355,27 @@ impl Dock {
         // picture; unclipped, a selection box round something at the edge of
         // the scene runs across the inspector, which looks like a rendering
         // fault rather than a selection.
+        // **The viewport is a drop target** — ADR 0099. It is a hole rather
+        // than a widget, so the interaction is allocated over the same
+        // rectangle the renderer draws into.
+        if let Some(rect) = hole.filter(egui::Rect::is_positive) {
+            let response = root.interact(
+                rect,
+                egui::Id::new("viewport_drop"),
+                egui::Sense::hover(),
+            );
+            if let Some(alias) = response.dnd_release_payload::<String>() {
+                let scale = root.ctx().pixels_per_point();
+                let at = root
+                    .ctx()
+                    .pointer_interact_pos()
+                    .map_or((0.0, 0.0), |p| (p.x * scale, p.y * scale));
+                actions.push(panels::UiAction::DropAsset {
+                    alias: (*alias).clone(),
+                    at,
+                });
+            }
+        }
         let clip = hole.filter(egui::Rect::is_positive);
         panels::selection_overlay(root, state, clip);
         panels::gizmo_overlay(root, state, clip);
@@ -737,6 +758,7 @@ mod tests {
                 mode: crate::gizmo::Mode::Move,
                 selection_edges: &[],
             rings: &[],
+            planes: &[],
             handles: &[],
                 dragging: None,
                 fps: 60.0,
@@ -794,6 +816,7 @@ mod tests {
                 mode: crate::gizmo::Mode::Move,
                 selection_edges: &[],
             rings: &[],
+            planes: &[],
             handles: &[],
                 dragging: None,
                 fps: 60.0,
@@ -850,6 +873,7 @@ mod tests {
             mode: crate::gizmo::Mode::Move,
             selection_edges: &[],
             rings: &[],
+            planes: &[],
             handles: &[],
             dragging: None,
             fps: 60.0,
