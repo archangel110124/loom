@@ -132,6 +132,21 @@ pub fn structure_editable(state: &PanelState<'_>) -> bool {
     state.editable && state.playing.is_none()
 }
 
+/// One prefab a scene declares, and who instances it — ADR 0101.
+///
+/// **Read from the unresolved file by the caller.** `prefab_load::for_reading`
+/// replaces an instance with the subtree it stood for, so the scene the
+/// inspector reads has no prefabs in it at all — the panel asked it anyway and
+/// said "this scene declares no prefabs" about a scene declaring five.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrefabRow {
+    pub key: String,
+    pub path: String,
+    pub id: String,
+    /// Paths of the nodes that instance it.
+    pub instances: Vec<String>,
+}
+
 /// A line in window pixels: where it starts, where it ends.
 pub type Segment = ((f32, f32), (f32, f32));
 
@@ -219,6 +234,8 @@ pub struct PanelState<'a> {
     pub view_mode: loom_render::ablate::ViewMode,
     /// What is wrong with the scene, recomputed when it changes — ADR 0093.
     pub problems: &'a [Problem],
+    /// The prefabs this scene declares, from the unresolved file — ADR 0101.
+    pub prefabs: &'a [PrefabRow],
     /// Scene files found beside this one, for the Project panel — ADR 0093.
     pub scenes: &'a [String],
     /// Which of `scenes` is open.
@@ -1100,21 +1117,14 @@ pub(crate) fn prefabs(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut V
     ui.heading("Prefabs");
     ui.separator();
 
-    let declared = state.scene.prefabs();
-    if declared.is_empty() {
+    if state.prefabs.is_empty() {
         ui.weak("this scene declares no prefabs");
         return;
     }
 
     egui::ScrollArea::vertical().id_salt("prefab_scroll").show(ui, |ui| {
-        for decl in &declared {
-            let instances: Vec<&String> = state
-                .scene
-                .nodes()
-                .iter()
-                .filter(|n| n.prefab.as_deref() == Some(decl.key.as_str()))
-                .map(|n| &n.path)
-                .collect();
+        for decl in state.prefabs {
+            let instances = &decl.instances;
 
             ui.horizontal(|ui| {
                 ui.strong(&decl.key);
@@ -1147,9 +1157,9 @@ pub(crate) fn prefabs(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut V
                 }
                 for path in instances.iter().take(6) {
                     let name = path.rsplit('/').next().unwrap_or(path);
-                    if ui.small_button(name).on_hover_text(*path).clicked() {
+                    if ui.small_button(name).on_hover_text(path).clicked() {
                         actions.push(UiAction::Select {
-                            path: (*path).clone(),
+                            path: path.clone(),
                             extend: false,
                         });
                     }
@@ -2641,6 +2651,7 @@ mod tests {
             filter: "",
             collapsed: &collapsed,
             problems: &[],
+            prefabs: &[],
             scenes: &[],
             open_scene: "",
             agent_log: &[],
@@ -2707,6 +2718,7 @@ mod tests {
             filter: "",
             collapsed: &collapsed,
             problems: &[],
+            prefabs: &[],
             scenes: &[],
             open_scene: "",
             agent_log: &[],

@@ -716,6 +716,8 @@ struct App {
     planes: Vec<gizmo::Plane>,
     /// What is wrong with the scene, recomputed on change — ADR 0093.
     problems: Vec<loom_editor::Problem>,
+    /// The prefabs the *unresolved* scene declares — ADR 0101.
+    prefabs: Vec<loom_editor::PrefabRow>,
     /// Every edit from outside this window, newest last — ADR 0093.
     ///
     /// **Separate from `agent_changes`, which fades in six seconds.** That is
@@ -978,6 +980,7 @@ impl App {
             clipboard: Vec::new(),
             scenes: Vec::new(),
             problems: Vec::new(),
+            prefabs: Vec::new(),
             agent_log: Vec::new(),
             handles: Vec::new(),
             play_objects: Vec::new(),
@@ -1189,6 +1192,7 @@ impl App {
         }
         self.view = view;
         self.recompute_problems();
+        self.recompute_prefabs();
         self.scenes = self.sibling_scenes();
         // Grass is placed from the scene the same way the meshes are, so a
         // reload has to re-place it or the window keeps showing the old field.
@@ -2013,6 +2017,7 @@ impl ApplicationHandler for App {
                     snap: self.snap,
                     view_mode: self.view_mode,
                     problems: &self.problems,
+                    prefabs: &self.prefabs,
                     scenes: &self.scenes,
                     open_scene: self.scene_path.to_str().unwrap_or_default(),
                     cpu_ms: self.cpu_ms,
@@ -3940,6 +3945,42 @@ impl App {
     }
 
 
+
+    /// The prefabs this scene declares, and who instances them — ADR 0101.
+    ///
+    /// **From the session's text, not `view.scene`.** The view holds the
+    /// *resolved* scene: `prefab_load::for_reading` has already replaced every
+    /// instance with the subtree it stood for, so it declares no prefabs and
+    /// has no nodes carrying a `prefab` key. Asking it produced "this scene
+    /// declares no prefabs" for a scene that declares five.
+    ///
+    /// Same reason the override markers parse the session text — resolution
+    /// erases exactly what these two panels are about.
+    fn recompute_prefabs(&mut self) {
+        let Some(text) = self.session.as_ref().map(loom_scene::Session::text) else {
+            self.prefabs = Vec::new();
+            return;
+        };
+        let Ok(unresolved) = loom_scene::Scene::parse(text) else {
+            return;
+        };
+        self.prefabs = unresolved
+            .prefabs()
+            .into_iter()
+            .map(|decl| loom_editor::PrefabRow {
+                instances: unresolved
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.prefab.as_deref() == Some(decl.key.as_str()))
+                    .map(|node| node.path.clone())
+                    .collect(),
+                key: decl.key,
+                path: decl.path,
+                id: decl.id,
+            })
+            .collect();
+    }
+
     /// What is wrong with the scene, for the Problems panel — ADR 0093.
     ///
     /// **The same three sources `loom validate` reads**, so the panel and the
@@ -4694,6 +4735,7 @@ pub fn run(
     // until the human made an unrelated edit. Same shape as the `--select`
     // flag: the first view is built before this struct exists.
     app.recompute_problems();
+    app.recompute_prefabs();
     app.scenes = app.sibling_scenes();
     app.refresh_agent_chat();
     if let Some(wanted) = script.mode.as_deref() {

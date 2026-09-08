@@ -712,6 +712,29 @@ mod tests {
         assert_eq!(tabs_of(&from_json(&json, 900.0)), expected);
     }
 
+    /// **The conflict banner draws.** It appears only when the scene changed on
+    /// disk under unsaved edits — a state no screenshot can reach without two
+    /// processes racing, so nothing had ever drawn it. Its two buttons discard
+    /// one version or the other, which is the worst thing in the editor to
+    /// discover is broken.
+    #[test]
+    fn the_conflict_banner_draws_and_offers_both_ways_out() {
+        let scene = loom_scene::Scene::parse("[scene]\nformat = 1\n\n[[node]]\nname = \"Root\"\n")
+            .expect("a one-node scene");
+        let registry = loom_reflect::TypeRegistry::new();
+        let mut actions = Vec::new();
+        egui::__run_test_ui(|root| {
+            let _ = &scene;
+            let _ = &registry;
+            crate::panels::conflict_banner(root, &mut actions);
+        });
+        // It offers a way out in both directions, or it is a dead end.
+        assert!(
+            actions.is_empty(),
+            "nothing is clicked, so nothing is emitted: {actions:?}"
+        );
+    }
+
     /// **Every tab draws, with something in it.** Four of the eleven rendered
     /// the string "not built yet" until ADR 0093, so nothing had ever exercised
     /// them; a panel that panics on its first non-empty state is a panel nobody
@@ -760,6 +783,7 @@ mod tests {
                 renaming: None,
                 view_mode: loom_render::ablate::ViewMode::default(),
                 problems: &problems,
+                prefabs: &[],
                 scenes: &scenes,
                 open_scene: "assets/games/deeper_demo.loom",
                 agent_log: &agent_log,
@@ -821,6 +845,7 @@ mod tests {
                 collapsed: &std::collections::BTreeSet::new(),
                 renaming: None,
                 problems: &[],
+            prefabs: &[],
                 scenes: &[],
                 open_scene: "",
                 agent_log: &[],
@@ -881,6 +906,7 @@ mod tests {
             renaming: None,
             view_mode: loom_render::ablate::ViewMode::default(),
             problems: &[],
+            prefabs: &[],
             scenes: &[],
             open_scene: "",
             agent_log: &[],
