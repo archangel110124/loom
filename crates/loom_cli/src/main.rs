@@ -291,6 +291,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
     ("run", &[
         ("--edit", false), ("--frames", true), ("--play", false),
         ("--shot", true), ("--hold", true), ("--menu", false),
+        ("--select", true),
     ]),
 ];
 
@@ -466,6 +467,7 @@ fn run(args: &[String]) -> (u8, String) {
                     shot,
                     hold,
                     menu: args.iter().any(|a| a == "--menu"),
+                    select: flag(args, "--select"),
                 };
                 match run::open_scene(
                     path,

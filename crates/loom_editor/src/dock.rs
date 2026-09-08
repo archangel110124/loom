@@ -335,7 +335,8 @@ impl Dock {
         }
         let actions = shell.actions;
 
-        match shell.viewport.map(|rect| rect.intersect(area)) {
+        let hole = shell.viewport.map(|rect| rect.intersect(area));
+        match hole {
             Some(hole) if hole.is_positive() => carve(root, area, hole),
             // No viewport tab visible: egui owns the lot. `available_rect`
             // collapses, `ViewportPlacement` clamps it to a degenerate 1×1 and
@@ -348,6 +349,14 @@ impl Dock {
         // Painted on top of everything, into the background layer, clipped to
         // window pixels the caller already projected. They allocate nothing,
         // so they cannot disturb the carve.
+        // Under the gizmo: the box says which thing, the handles say what you
+        // can do to it.
+        // **Clipped to the viewport.** These draw world-space things over the
+        // picture; unclipped, a selection box round something at the edge of
+        // the scene runs across the inspector, which looks like a rendering
+        // fault rather than a selection.
+        let clip = hole.filter(egui::Rect::is_positive);
+        panels::selection_overlay(root, state, clip);
         panels::gizmo_overlay(root, state);
         panels::agent_overlay(root, state);
         actions
@@ -726,7 +735,8 @@ mod tests {
                 editable: true,
                 registry: &registry,
                 mode: crate::gizmo::Mode::Move,
-                handles: &[],
+                selection_edges: &[],
+            handles: &[],
                 dragging: None,
                 fps: 60.0,
                 cpu_ms: 1.0,
@@ -781,7 +791,8 @@ mod tests {
                 editable: true,
                 registry: &registry,
                 mode: crate::gizmo::Mode::Move,
-                handles: &[],
+                selection_edges: &[],
+            handles: &[],
                 dragging: None,
                 fps: 60.0,
                 cpu_ms: 1.0,
@@ -835,6 +846,7 @@ mod tests {
             editable: true,
             registry: &registry,
             mode: crate::gizmo::Mode::Move,
+            selection_edges: &[],
             handles: &[],
             dragging: None,
             fps: 60.0,

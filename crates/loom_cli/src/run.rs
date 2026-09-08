@@ -297,6 +297,13 @@ pub struct Script {
     pub hold: Vec<(u64, loom_script::Motion)>,
     /// Put the pause menu up as soon as play starts.
     pub menu: bool,
+    /// Select this node on open — ADR 0099.
+    ///
+    /// **So a screenshot can show a selection.** Everything else about the
+    /// editor is reachable headlessly; picking a node was mouse-only, which
+    /// made the one thing a human does first the one thing no gate row and no
+    /// agent could set up.
+    pub select: Option<String>,
 }
 
 impl Script {
@@ -1822,6 +1829,7 @@ impl ApplicationHandler for App {
                 // Before `drawn` borrows the object list: this prunes the
                 // faded entries, so it needs `&mut self`.
                 let marks = self.agent_marks(&projection, now);
+                let selection_edges = self.selection_edges(&projection);
 
 
                 let drawn = match self.play.as_ref() {
@@ -1939,6 +1947,7 @@ impl ApplicationHandler for App {
                     })
                     .collect();
                 let state = PanelState {
+                    selection_edges: &selection_edges,
                     snap: self.snap,
                     view_mode: self.view_mode,
                     problems: &self.problems,
@@ -3898,6 +3907,65 @@ impl App {
         crate::log::info(format!("loaded the game from {}", path.display()));
     }
 
+
+    /// The selection's bounding box as screen-space edges — ADR 0099.
+    ///
+    /// **Twelve segments per selected node**, projected here because the
+    /// projection belongs to the camera and `loom_editor` is handed only what
+    /// it draws. A corner behind the eye drops its segments rather than
+    /// projecting to a wild coordinate and drawing a line across the window.
+    fn selection_edges(&self, projection: &gizmo::View) -> Vec<loom_editor::panels::Segment> {
+        // The twelve edges of a box, as pairs of corner indices, where a
+        // corner's bits are (x, y, z) taken from min or max.
+        const EDGES: [(usize, usize); 12] = [
+            (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3),
+            (2, 6), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7),
+        ];
+        let mut out = Vec::new();
+        for path in &self.selected {
+            // **The subtree's bounds, not the node's own.** A rig node carries
+            // a transform and no mesh — `Rig/Boat` is the whole boat and has no
+            // `MeshRenderer` at all — so boxing only what the node itself draws
+            // highlights nothing for exactly the nodes a human clicks first.
+            // Unity draws the union over the subtree; so does this.
+            let prefix = format!("{path}/");
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            let mut found = false;
+            for (candidate, bounds) in &self.view.picks {
+                if candidate != path && !candidate.starts_with(&prefix) {
+                    continue;
+                }
+                found = true;
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(bounds.min[axis]);
+                    max[axis] = max[axis].max(bounds.max[axis]);
+                }
+            }
+            if !found {
+                continue;
+            }
+            let corners: Vec<Option<(f32, f32)>> = (0..8)
+                .map(|i| {
+                    let pick = |bit: usize, axis: usize| {
+                        if i & (1 << bit) == 0 { min[axis] } else { max[axis] }
+                    };
+                    projection.project(loom_render::glam::Vec3::new(
+                        pick(0, 0),
+                        pick(1, 1),
+                        pick(2, 2),
+                    ))
+                })
+                .collect();
+            for (a, b) in EDGES {
+                if let (Some(from), Some(to)) = (corners[a], corners[b]) {
+                    out.push((from, to));
+                }
+            }
+        }
+        out
+    }
+
     /// What the camera dollies toward and orbits around — ADR 0098.
     ///
     /// **The selection when there is one**, because that is what a human is
@@ -4226,6 +4294,14 @@ pub fn run(
     );
     app.frames_left = frames.filter(|n| *n > 0);
     let scripted = script.driving();
+    // **An asked-for selection, applied where the script lands** — ADR 0099.
+    // The view is built before `App` exists and `show` only runs on a *change*,
+    // so this is the one point that sees both the opening scene and the flag.
+    if let Some(wanted) = script.select.clone()
+        && app.view.paths.contains(&wanted)
+    {
+        app.selected = vec![wanted];
+    }
     app.script = script;
     // A front end only makes sense in front of a game, so `--play` is what
     // arms it — and when it is armed it takes autoplay's job: the game starts

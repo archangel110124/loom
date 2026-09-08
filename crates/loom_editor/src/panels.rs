@@ -95,6 +95,9 @@ pub enum UiAction {
     Stop,
 }
 
+/// A line in window pixels: where it starts, where it ends.
+pub type Segment = ((f32, f32), (f32, f32));
+
 /// One thing wrong with the scene — ADR 0093.
 ///
 /// **The editor reports what `loom validate` reports**, from the same sources:
@@ -175,6 +178,12 @@ pub struct PanelState<'a> {
     pub agent_log: &'a [AgentEdit],
     /// Labels of transactions that were undone and can be redone, newest last.
     pub redo_history: &'a [String],
+    /// The selection's bounding box, as screen-space edges — ADR 0099.
+    ///
+    /// **Projected by the caller**, because the projection lives with the
+    /// camera in `loom_cli` and this crate stays a pure function of what it is
+    /// handed. Twelve segments per selected node, in window pixels.
+    pub selection_edges: &'a [Segment],
     /// Gizmo handles in **window pixels**, as the viewport computed them.
     pub handles: &'a [Handle],
     /// The **axis** being dragged, so its handle can be drawn as grabbed.
@@ -1430,6 +1439,38 @@ pub(crate) fn agent_overlay(root: &mut egui::Ui, state: &PanelState<'_>) {
 ///
 /// In the background layer: over the 3D image, under every panel, so a handle
 /// never draws on top of the inspector it is behind.
+/// Draw a box round whatever is selected — ADR 0099.
+///
+/// **Clicking a name in the hierarchy has to show you the thing.** Selecting
+/// put a gizmo at the node and marked nothing else, so on a boat of 260 parts
+/// the only feedback that you had picked the right one was three small axis
+/// lines somewhere in the picture.
+///
+/// A projected bounding box rather than a rendered outline: an outline needs a
+/// stencil pass or a jump-flood, and this is twelve line segments over a
+/// picture that is already drawn. It reads through geometry, which is what you
+/// want when the thing you selected is inside something else.
+pub(crate) fn selection_overlay(
+    root: &mut egui::Ui,
+    state: &PanelState<'_>,
+    clip: Option<egui::Rect>,
+) {
+    if state.selection_edges.is_empty() {
+        return;
+    }
+    let ctx = root.ctx().clone();
+    let scale = ctx.pixels_per_point();
+    let mut painter = ctx.layer_painter(egui::LayerId::background());
+    if let Some(rect) = clip {
+        painter.set_clip_rect(rect);
+    }
+    let point = |(x, y): (f32, f32)| egui::pos2(x / scale, y / scale);
+    let colour = crate::theme::tokens(false).accent;
+    for (from, to) in state.selection_edges {
+        painter.line_segment([point(*from), point(*to)], egui::Stroke::new(1.5, colour));
+    }
+}
+
 pub(crate) fn gizmo_overlay(root: &mut egui::Ui, state: &PanelState<'_>) {
     if state.handles.is_empty() {
         return;
