@@ -3959,6 +3959,68 @@ impl Play {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The editor's flagship, tested at last.** Editing a field while Play is
+    /// running works by rebuilding `Play` from the edited scene and restoring
+    /// the simulation from an ADR 0088 snapshot — see `App::reapply_to_play`.
+    /// That function had one call site and no test, which is exactly how the
+    /// gate in front of it shipped disabled twice without anybody noticing.
+    ///
+    /// This is the mechanism it stands on: the rebuilt world must carry **both**
+    /// the new value and the old simulation.
+    #[test]
+    fn an_edit_during_play_keeps_the_simulation_and_takes_the_new_value() {
+        let path = std::path::Path::new("../../assets/test/jib_vi_drift.loom");
+        let base = path.parent().expect("a directory");
+        let source = std::fs::read_to_string(path).expect("fixture");
+
+        let scene = Scene::parse(&source).expect("valid scene");
+        let world = World::from_scene(&scene);
+        let mut play = Play::start(world, base);
+        play.run(90);
+
+        let find = |play: &Play| {
+            play.world
+                .entities()
+                .iter()
+                .copied()
+                .find(|e| play.world.path(*e) == Some("Sea/Boat"))
+                .expect("the boat is in the scene")
+        };
+        let boat = |play: &Play| {
+            let entity = find(play);
+            let g = play.world.global_transform(entity).expect("a transform");
+            [g.matrix[12], g.matrix[13], g.matrix[14]]
+        };
+        let drifted = boat(&play);
+        assert!(
+            drifted[1] != 0.40,
+            "90 ticks should have moved the boat off its authored height"
+        );
+        let snapshot = play.save_game(90);
+
+        // The edit a human would make while watching: retune the hull's mass.
+        let edited = source.replace("mass = 57636.0", "mass = 12345.0");
+        assert_ne!(edited, source, "the fixture must contain the anchor");
+
+        let scene = Scene::parse(&edited).expect("the edited scene is still valid");
+        let world = World::from_scene(&scene);
+        let mut rebuilt = Play::start(world, base);
+        rebuilt.load_game(&snapshot);
+
+        // The simulation survived the rebuild...
+        let restored = boat(&rebuilt);
+        for axis in 0..3 {
+            assert!(
+                (restored[axis] - drifted[axis]).abs() < 1e-3,
+                "the boat was put back where it was: {restored:?} against {drifted:?}"
+            );
+        }
+        // ...and the new value is the one the rebuilt world was built from.
+        let mass = rebuilt.world.body_mass(find(&rebuilt));
+        assert!((mass - 12345.0).abs() < 1.0, "the edited mass reached the world: {mass}");
+    }
+
     use super::*;
     use loom_scene::Scene;
 

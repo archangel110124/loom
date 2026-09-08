@@ -733,7 +733,14 @@ pub(crate) fn hierarchy(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
                     })
                     .response
                     .on_hover_text(path);
-                if let Some(dragged) = response.dnd_release_payload::<String>()
+                // **Gated like the menu beside it.** Reparenting rewrites the
+                // paths a running simulation is keyed by, and this drop sat
+                // outside the guard that covers the identical verb in the
+                // context menu two lines below — the same verb behind two
+                // different gates, which is the defect this taxonomy exists to
+                // stop.
+                if structure_editable(state)
+                    && let Some(dragged) = response.dnd_release_payload::<String>()
                     && *dragged != *path
                 {
                     actions.push(UiAction::Reparent {
@@ -958,14 +965,21 @@ pub(crate) fn assets(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Ve
                 // selection.** Placing a mesh was select-a-node-then-assign,
                 // which is a tools programmer's flow; dragging it into the
                 // world is what an artist reaches for.
-                let enabled = state.editable && !state.selected.is_empty();
+                // Not while playing: the drop is refused there, and a drag
+                // that silently does nothing is worse than one you cannot start.
+                let enabled = structure_editable(state) && !state.selected.is_empty();
+                let droppable = structure_editable(state);
                 let id = egui::Id::new(("asset", asset));
-                let response = ui
-                    .dnd_drag_source(id, asset.clone(), |ui| {
+                let response = if droppable {
+                    ui.dnd_drag_source(id, asset.clone(), |ui| {
                         ui.add_enabled(enabled, egui::Button::new(format!("◻ {asset}")));
                     })
                     .response
-                    .on_hover_text("drag into the viewport, or click to assign to the selection");
+                    .on_hover_text("drag into the viewport, or click to assign to the selection")
+                } else {
+                    ui.add_enabled(false, egui::Button::new(format!("◻ {asset}")))
+                        .on_disabled_hover_text("stop playing to place assets")
+                };
                 if response.clicked() && enabled {
                     actions.push(UiAction::AssignMesh(asset.clone()));
                 }
@@ -1060,7 +1074,7 @@ pub(crate) fn prefabs(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut V
 
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(state.editable, egui::Button::new("Add instance"))
+                    .add_enabled(structure_editable(state), egui::Button::new("Add instance"))
                     .on_hover_text("spawn one under the selection")
                     .clicked()
                 {

@@ -3056,6 +3056,13 @@ impl App {
 
     /// Move a node under a new parent.
     fn reparent(&mut self, node: &str, parent: &str) {
+        // Guarded here as well as in the panel: every path into reparenting
+        // goes through this one function, so this is where the rule cannot be
+        // missed by a new call site.
+        if self.play.is_some() {
+            crate::log::warn("stop playing before moving a node in the hierarchy".to_owned());
+            return;
+        }
         // A child inherits its parent's scale, so a non-uniformly scaled
         // parent squashes whatever you drop into it. The blockout fixture
         // carries a comment warning about exactly this; saying it at the
@@ -4079,6 +4086,15 @@ impl App {
         )
     }
 
+    /// The smallest thing `Scene::parse` accepts and the viewer can show: one
+    /// root node, and an id because §3 wants one.
+    ///
+    /// **Shared with its test**, which used to re-declare the string — so the
+    /// test proved a copy parsed while the template drifted underneath it.
+    fn blank_scene(id: &str) -> String {
+        format!("# A new scene.\n[scene]\nformat = 1\nid = \"{id}\"\n\n[[node]]\nname = \"Root\"\n")
+    }
+
     /// Start an empty scene beside this one — ADR 0099.
     ///
     /// **A real file, immediately.** An unsaved in-memory document would need a
@@ -4092,12 +4108,7 @@ impl App {
             n += 1;
             path = self.base.join(format!("untitled{n}.loom"));
         }
-        // The smallest thing `Scene::parse` accepts and the viewer can show:
-        // one root node, and an id, because §3 wants one.
-        let scene = format!(
-            "# A new scene.\n[scene]\nformat = 1\nid = \"{}\"\n\n[[node]]\nname = \"Root\"\n",
-            Self::scene_id_for(&path),
-        );
+        let scene = Self::blank_scene(&Self::scene_id_for(&path));
         if let Err(e) = std::fs::write(&path, scene) {
             crate::log::error(format!("{}: {e}", path.display()));
             return;
@@ -4126,7 +4137,12 @@ impl App {
             crate::log::warn("this scene is open read-only".to_owned());
             return;
         };
-        if let Err(e) = std::fs::write(&path, session.text()) {
+        // **A copy needs its own identity.** Writing the session verbatim kept
+        // the original's `[scene] id`, so the two files claimed to be the same
+        // scene — the exact collision `scene_id_for` exists to prevent, created
+        // by the one command whose whole job is to make a second file.
+        let text = replace_scene_id(session.text(), &Self::scene_id_for(&path));
+        if let Err(e) = std::fs::write(&path, text) {
             crate::log::error(format!("{}: {e}", path.display()));
             return;
         }
@@ -4633,6 +4649,41 @@ pub fn run(
 ///
 /// # Errors
 /// A message describing what stopped it.
+/// Swap a scene's `id` for another, leaving the rest of the file alone.
+///
+/// Text, not a re-serialise: the whole point of the format's op layer is that a
+/// human's comments and spacing survive an edit, and "save as" must not be the
+/// one command that reformats their file on the way out.
+fn replace_scene_id(text: &str, id: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_scene = false;
+    let mut written = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            // Leaving `[scene]` without having seen an id: add one, so a file
+            // that never had one still gets its own.
+            if in_scene && !written {
+                out.push(format!("id = \"{id}\""));
+                written = true;
+            }
+            in_scene = trimmed.starts_with("[scene]");
+        }
+        if in_scene && !written && trimmed.starts_with("id") && trimmed.contains('=') {
+            out.push(format!("id = \"{id}\""));
+            written = true;
+            continue;
+        }
+        out.push(line.to_owned());
+    }
+    if in_scene && !written {
+        out.push(format!("id = \"{id}\""));
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
+}
+
 pub fn open_scene(
     path: &str,
     editable: bool,
@@ -4661,6 +4712,49 @@ pub fn open_scene(
 #[cfg(test)]
 mod tests {
 
+    /// **A saved copy is a different scene.** `save_as` wrote the session
+    /// verbatim, so the duplicate kept the original's id and the two files
+    /// claimed to be the same scene — created by the one command whose whole
+    /// job is to make a second file.
+    #[test]
+    fn saving_as_gives_the_copy_its_own_id() {
+        let original = "[scene]\nformat = 1\nid = \"aaaaaaaa-0000-4000-8000-000000000000\"\n\n\
+             # a comment the human wrote\n[[node]]\nname = \"Root\"\n";
+        let copy = super::replace_scene_id(original, "bbbbbbbb-1111-4111-8111-111111111111");
+        assert!(copy.contains("bbbbbbbb-1111-4111-8111-111111111111"), "{copy}");
+        assert!(!copy.contains("aaaaaaaa"), "the old id must be gone: {copy}");
+        assert!(
+            copy.contains("# a comment the human wrote"),
+            "the rest of the file survives: {copy}"
+        );
+        loom_scene::Scene::parse(&copy).expect("still a scene");
+    }
+
+    /// A scene with no id gets one rather than silently staying anonymous.
+    #[test]
+    fn a_scene_without_an_id_gains_one() {
+        let original = "[scene]\nformat = 1\n\n[[node]]\nname = \"Root\"\n";
+        let copy = super::replace_scene_id(original, "cccccccc-2222-4222-8222-222222222222");
+        assert!(copy.contains("cccccccc-2222"), "{copy}");
+        loom_scene::Scene::parse(&copy).expect("still a scene");
+    }
+
+    /// **Only the scene's id.** A node called `id` or an asset id elsewhere in
+    /// the file must not be rewritten by a text pass.
+    #[test]
+    fn only_the_scene_table_is_touched() {
+        let original = "[scene]\nformat = 1\nid = \"aaaaaaaa-0000-4000-8000-000000000000\"\n\n\
+             [[prefab]]\nkey = \"crate\"\nid = \"7a41c0de-5b2e-4f18-9d63-2c8ae5f10b47\"\n\
+             path = \"../p/crate.loom\"\n";
+        let copy = super::replace_scene_id(original, "dddddddd-3333-4333-8333-333333333333");
+        assert!(copy.contains("dddddddd-3333"), "{copy}");
+        assert!(
+            copy.contains("7a41c0de-5b2e-4f18-9d63-2c8ae5f10b47"),
+            "the prefab's id is not the scene's: {copy}"
+        );
+    }
+
+
     /// **A new scene has to parse.** It is written straight to disk and opened,
     /// so a template with a malformed id or a missing field would create a file
     /// the editor then refuses to load — and the human is left with an
@@ -4669,9 +4763,8 @@ mod tests {
     fn a_new_scene_is_a_scene() {
         let path = std::path::Path::new("/tmp/loom-new-scene-test/untitled.loom");
         let id = super::App::scene_id_for(path);
-        let text = format!(
-            "# A new scene.\n[scene]\nformat = 1\nid = \"{id}\"\n\n[[node]]\nname = \"Root\"\n",
-        );
+        // The template itself, not a copy of it.
+        let text = super::App::blank_scene(&id);
         let scene = loom_scene::Scene::parse(&text).expect("the template must parse");
         assert_eq!(scene.nodes().len(), 1);
         assert_eq!(scene.scene_id().as_deref(), Some(id.as_str()));
