@@ -304,6 +304,11 @@ pub struct Script {
     /// made the one thing a human does first the one thing no gate row and no
     /// agent could set up.
     pub select: Option<String>,
+    /// Which gizmo tool to start in — ADR 0099. Move, Rotate or Scale.
+    ///
+    /// Same reason as `select`: the rotation rings only exist in Rotate mode,
+    /// so without this no screenshot and no gate row could ever see them.
+    pub mode: Option<String>,
 }
 
 impl Script {
@@ -595,6 +600,12 @@ struct Drag {
     /// reason `start` exists: absolute from the beginning, so a dropped frame
     /// costs nothing.
     group: Vec<(String, [[f32; 3]; 3])>,
+    /// The gizmo's centre in window pixels, and the angle the press was at —
+    /// ADR 0099. Only meaningful for a ring drag.
+    centre: (f32, f32),
+    from_angle: f32,
+    /// True when the press landed on a rotation ring rather than an axis line.
+    ring: bool,
 }
 
 struct App {
@@ -685,6 +696,9 @@ struct App {
     /// Where the last pick landed, so clicking the same spot cycles through
     /// what is stacked there — ADR 0099.
     last_pick: Option<(f32, f32)>,
+    /// Rotation rings in window pixels, recomputed with the handles so a press
+    /// hit-tests exactly what was drawn — ADR 0099.
+    rings: Vec<(usize, Vec<(f32, f32)>)>,
     /// What is wrong with the scene, recomputed on change — ADR 0093.
     problems: Vec<loom_editor::Problem>,
     /// Every edit from outside this window, newest last — ADR 0093.
@@ -941,6 +955,7 @@ impl App {
             hierarchy_filter: String::new(),
             collapsed: std::collections::BTreeSet::new(),
             last_pick: None,
+            rings: Vec::new(),
             clipboard: Vec::new(),
             scenes: Vec::new(),
             problems: Vec::new(),
@@ -1814,15 +1829,17 @@ impl ApplicationHandler for App {
                 // so the next mouse press hit-tests exactly what was drawn.
                 // No handles while the sim runs: they would move a node the
                 // physics engine is about to move back.
-                self.handles = match (self.session.is_some() && self.play.is_none(), self.focused()) {
-                    (true, Some(path)) => self
-                        .view
-                        .node_bounds(&path)
-                        .map(|b| {
-                            let c = (Vec3::from_array(b.min) + Vec3::from_array(b.max)) * 0.5;
-                            gizmo::handles(&projection, c)
-                        })
-                        .unwrap_or_default(),
+                let editing_now = self.session.is_some() && self.play.is_none();
+                let focused_bounds = editing_now
+                    .then(|| self.focused())
+                    .flatten()
+                    .and_then(|path| self.subtree_bounds(&path));
+                let centre = focused_bounds.map(|(min, max)| (min + max) * 0.5);
+                self.handles = centre.map_or_else(Vec::new, |c| gizmo::handles(&projection, c));
+                // A ring the size of the thing it turns, so it reads as
+                // belonging to the object rather than floating at a fixed size.
+                self.rings = match (centre, self.mode) {
+                    (Some(c), Mode::Rotate) => gizmo::rings(&projection, c),
                     _ => Vec::new(),
                 };
 
@@ -1947,6 +1964,7 @@ impl ApplicationHandler for App {
                     })
                     .collect();
                 let state = PanelState {
+                    rings: &self.rings,
                     selection_edges: &selection_edges,
                     snap: self.snap,
                     view_mode: self.view_mode,
@@ -3548,6 +3566,36 @@ impl App {
         if self.session.is_none() {
             return;
         }
+        // **Rings before lines, in Rotate mode.** The ring is the thing drawn
+        // in that mode, so it is the thing a press should find; the axis lines
+        // stay grabbable underneath for anyone who liked them.
+        if self.mode == Mode::Rotate
+            && let Some(axis) = gizmo::grab_ring(&self.rings, self.cursor)
+            && let Some(node) = self.focused()
+            && let Some(transform) = self.view.transform_of(&node)
+            && let Some(handle) = self.handles.iter().find(|h| h.axis == axis).cloned()
+        {
+            let group = self
+                .selected
+                .iter()
+                .filter_map(|path| {
+                    let t = self.view.transform_of(path)?;
+                    Some((path.clone(), [t.pos, t.rot_euler, t.scale]))
+                })
+                .collect();
+            let centre = handle.origin;
+            self.drag = Some(Drag {
+                handle,
+                from: self.cursor,
+                start: [transform.pos, transform.rot_euler, transform.scale],
+                node,
+                group,
+                centre,
+                from_angle: gizmo::angle_about(centre, self.cursor),
+                ring: true,
+            });
+            return;
+        }
         if let Some(index) = gizmo::grab(&self.handles, self.cursor) {
             let Some(node) = self.focused() else { return };
             let Some(transform) = self.view.transform_of(&node) else {
@@ -3567,6 +3615,9 @@ impl App {
                 start: [transform.pos, transform.rot_euler, transform.scale],
                 node,
                 group,
+                centre: self.handles[index].origin,
+                from_angle: 0.0,
+                ring: false,
             });
             return;
         }
@@ -3631,7 +3682,22 @@ impl App {
             }
             Mode::Rotate => {
                 let mut rot = start_rot;
-                rot[axis] = round(start_rot[axis] + travelled * ROTATE_PER_UNIT);
+                // **A ring turns by the angle the hand swept about it** — ADR
+                // 0099 — and an axis line still turns by how far it was
+                // dragged, so the old handles keep working. One drag cannot
+                // pass half a turn, because the swept angle is measured
+                // absolutely from the press and wraps at pi; that is the price
+                // of being drift-free across a dropped frame.
+                let degrees = if drag.ring {
+                    gizmo::shortest_turn(
+                        drag.from_angle,
+                        gizmo::angle_about(drag.centre, self.cursor),
+                    )
+                    .to_degrees()
+                } else {
+                    travelled * ROTATE_PER_UNIT
+                };
+                rot[axis] = round(start_rot[axis] + degrees);
                 (
                     format!("Rotate {node}"),
                     transform_op(&node, None, Some(rot), None),
@@ -3908,6 +3974,30 @@ impl App {
     }
 
 
+    /// The union of a node's own bounds and every descendant's — ADR 0099.
+    ///
+    /// **A rig node has no mesh.** `Rig/Boat` is the whole boat and carries no
+    /// `MeshRenderer`, so anything keyed on the node's own bounds — the gizmo,
+    /// the selection box, the orbit pivot — had nothing to work with for
+    /// exactly the nodes a human clicks first. The gizmo simply did not appear.
+    fn subtree_bounds(&self, path: &str) -> Option<(Vec3, Vec3)> {
+        let prefix = format!("{path}/");
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        let mut found = false;
+        for (candidate, bounds) in &self.view.picks {
+            if candidate != path && !candidate.starts_with(&prefix) {
+                continue;
+            }
+            found = true;
+            for axis in 0..3 {
+                min[axis] = min[axis].min(bounds.min[axis]);
+                max[axis] = max[axis].max(bounds.max[axis]);
+            }
+        }
+        found.then(|| (Vec3::from_array(min), Vec3::from_array(max)))
+    }
+
     /// The selection's bounding box as screen-space edges — ADR 0099.
     ///
     /// **Twelve segments per selected node**, projected here because the
@@ -3923,28 +4013,11 @@ impl App {
         ];
         let mut out = Vec::new();
         for path in &self.selected {
-            // **The subtree's bounds, not the node's own.** A rig node carries
-            // a transform and no mesh — `Rig/Boat` is the whole boat and has no
-            // `MeshRenderer` at all — so boxing only what the node itself draws
-            // highlights nothing for exactly the nodes a human clicks first.
-            // Unity draws the union over the subtree; so does this.
-            let prefix = format!("{path}/");
-            let mut min = [f32::MAX; 3];
-            let mut max = [f32::MIN; 3];
-            let mut found = false;
-            for (candidate, bounds) in &self.view.picks {
-                if candidate != path && !candidate.starts_with(&prefix) {
-                    continue;
-                }
-                found = true;
-                for axis in 0..3 {
-                    min[axis] = min[axis].min(bounds.min[axis]);
-                    max[axis] = max[axis].max(bounds.max[axis]);
-                }
-            }
-            if !found {
+            // The subtree's bounds, not the node's own — see `subtree_bounds`.
+            let Some((min, max)) = self.subtree_bounds(path) else {
                 continue;
-            }
+            };
+            let (min, max) = (min.to_array(), max.to_array());
             let corners: Vec<Option<(f32, f32)>> = (0..8)
                 .map(|i| {
                     let pick = |bit: usize, axis: usize| {
@@ -3974,13 +4047,10 @@ impl App {
     fn orbit_pivot(&self) -> Vec3 {
         self.selected
             .first()
-            .and_then(|path| self.view.node_bounds(path))
+            .and_then(|path| self.subtree_bounds(path))
             .map_or_else(
                 || self.camera.position + self.camera.forward() * 8.0,
-                |bounds| {
-                    let (min, max) = (Vec3::from_array(bounds.min), Vec3::from_array(bounds.max));
-                    (min + max) * 0.5
-                },
+                |(min, max)| (min + max) * 0.5,
             )
     }
 
@@ -4301,6 +4371,13 @@ pub fn run(
         && app.view.paths.contains(&wanted)
     {
         app.selected = vec![wanted];
+    }
+    if let Some(wanted) = script.mode.as_deref() {
+        app.mode = match wanted.to_ascii_lowercase().as_str() {
+            "rotate" => Mode::Rotate,
+            "scale" => Mode::Scale,
+            _ => Mode::Move,
+        };
     }
     app.script = script;
     // A front end only makes sense in front of a game, so `--play` is what

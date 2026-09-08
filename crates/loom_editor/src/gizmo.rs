@@ -187,6 +187,115 @@ pub fn handles(view: &View, origin: Vec3) -> Vec<Handle> {
     out
 }
 
+/// How many points a rotation ring is drawn with. Enough that the arc reads as
+/// a circle at gizmo size and few enough to hit-test in a loop.
+const RING_SEGMENTS: usize = 48;
+
+/// How wide a rotation ring is drawn, in window pixels. A little larger than
+/// the axis handles so the caps stay reachable inside it.
+const RING_PIXELS: f32 = 78.0;
+
+/// A ring per axis, in screen space — ADR 0099.
+///
+/// **Rotate needs a different shape from move.** Three straight lines are the
+/// right picture for translation and the wrong one for rotation: dragging along
+/// a line to turn a thing has no relationship to the motion, and there is
+/// nothing on screen saying which plane an axis turns in. A ring is the plane.
+///
+/// Returned as projected polylines because everything else the gizmo hands out
+/// is already in window pixels, and the caller draws rather than computes.
+#[must_use]
+pub fn rings(view: &View, origin: Vec3) -> Vec<(usize, Vec<(f32, f32)>)> {
+    // **A constant size on screen, like the handles.** Sizing the ring to the
+    // object put a ring half the boat's diagonal across the window — bigger
+    // than the viewport, running off every edge, and impossible to aim at. A
+    // gizmo is a control, and a control does not change size when you zoom.
+    let Some(screen) = view.project(origin) else {
+        return Vec::new();
+    };
+    let Some(along) = view.project(origin + Vec3::X) else {
+        return Vec::new();
+    };
+    let (dx, dy) = (along.0 - screen.0, along.1 - screen.1);
+    let pixels_per_unit = (dx * dx + dy * dy).sqrt();
+    if pixels_per_unit < 1.0 {
+        return Vec::new();
+    }
+    let radius = RING_PIXELS / pixels_per_unit;
+
+    let mut out = Vec::new();
+    for axis in 0..3 {
+        // The two world directions that span the plane this axis turns in.
+        let (u, v) = match axis {
+            0 => (Vec3::Y, Vec3::Z),
+            1 => (Vec3::Z, Vec3::X),
+            _ => (Vec3::X, Vec3::Y),
+        };
+        let mut points = Vec::with_capacity(RING_SEGMENTS + 1);
+        for step in 0..=RING_SEGMENTS {
+            #[allow(clippy::cast_precision_loss)]
+            let angle = step as f32 / RING_SEGMENTS as f32 * std::f32::consts::TAU;
+            let at = origin + (u * angle.cos() + v * angle.sin()) * radius;
+            // A ring that crosses behind the eye is drawn in the pieces that
+            // are in front of it, rather than joined across the whole window.
+            match view.project(at) {
+                Some(point) => points.push(point),
+                None => break,
+            }
+        }
+        if points.len() > 2 {
+            out.push((axis, points));
+        }
+    }
+    out
+}
+
+/// Which ring the cursor is on, if any — ADR 0099.
+///
+/// Nearest by distance to the polyline, within a few pixels, so the ring that
+/// is edge-on does not swallow clicks meant for the one facing you.
+#[must_use]
+pub fn grab_ring(rings: &[(usize, Vec<(f32, f32)>)], cursor: (f32, f32)) -> Option<usize> {
+    const REACH: f32 = 7.0;
+    let mut best: Option<(f32, usize)> = None;
+    for (axis, points) in rings {
+        for point in points {
+            let (dx, dy) = (point.0 - cursor.0, point.1 - cursor.1);
+            let distance = (dx * dx + dy * dy).sqrt();
+            if distance <= REACH && best.is_none_or(|(d, _)| distance < d) {
+                best = Some((distance, *axis));
+            }
+        }
+    }
+    best.map(|(_, axis)| axis)
+}
+
+/// The angle of `cursor` about `centre`, in radians — ADR 0099.
+///
+/// **This is what makes a ring a ring.** Rotation is the angle swept about the
+/// gizmo, not a distance dragged along a line: the hand goes round and the
+/// thing goes round with it.
+#[must_use]
+pub fn angle_about(centre: (f32, f32), cursor: (f32, f32)) -> f32 {
+    (cursor.1 - centre.1).atan2(cursor.0 - centre.0)
+}
+
+/// The shorter way round between two angles, in radians.
+///
+/// Without this a drag across the wrap point jumps a full turn: atan2 steps
+/// from +pi to -pi and the node spins 360 degrees in one frame.
+#[must_use]
+pub fn shortest_turn(from: f32, to: f32) -> f32 {
+    let mut delta = to - from;
+    while delta > std::f32::consts::PI {
+        delta -= std::f32::consts::TAU;
+    }
+    while delta < -std::f32::consts::PI {
+        delta += std::f32::consts::TAU;
+    }
+    delta
+}
+
 /// The handle under the cursor, if any — nearest first, so overlapping handles
 /// resolve the way they look.
 #[must_use]
@@ -291,6 +400,67 @@ pub fn snap(value: f32, step: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A drag across the wrap point must not spin the node a full turn.**
+    /// atan2 steps from +pi to -pi at due west; taking the raw difference there
+    /// is a 360-degree jump in one frame, which is the classic rotation-gizmo
+    /// bug and is invisible until somebody drags through that exact spot.
+    #[test]
+    fn a_turn_across_the_wrap_point_is_the_short_way() {
+        let just_under = std::f32::consts::PI - 0.05;
+        let just_over = -std::f32::consts::PI + 0.05;
+        let delta = super::shortest_turn(just_under, just_over);
+        assert!(delta.abs() < 0.2, "expected a small step, got {delta}");
+        assert!(delta > 0.0, "and in the direction the hand moved: {delta}");
+    }
+
+    #[test]
+    fn a_turn_the_other_way_is_also_short() {
+        let delta = super::shortest_turn(-std::f32::consts::PI + 0.05, std::f32::consts::PI - 0.05);
+        assert!(delta.abs() < 0.2, "{delta}");
+        assert!(delta < 0.0, "{delta}");
+    }
+
+    /// The angle is measured about the gizmo, so a cursor due right of it is
+    /// zero and one below it is a quarter turn — screen y grows downward.
+    #[test]
+    fn the_angle_is_measured_about_the_centre() {
+        let centre = (100.0, 100.0);
+        assert!(super::angle_about(centre, (200.0, 100.0)).abs() < 1e-6);
+        let down = super::angle_about(centre, (100.0, 200.0));
+        assert!((down - std::f32::consts::FRAC_PI_2).abs() < 1e-6, "{down}");
+    }
+
+    /// **Three rings, and each spans the plane its axis turns in.** A ring that
+    /// collapsed to a line would be unclickable and would say nothing about the
+    /// plane, which is the whole reason it is a ring.
+    #[test]
+    fn every_axis_gets_a_ring_that_is_not_a_point() {
+        let rings = super::rings(&view(), Vec3::ZERO);
+        assert_eq!(rings.len(), 3, "one per axis");
+        for (axis, points) in rings {
+            // **Either direction, not both.** A ring seen edge-on is a line and
+            // that is correct — the test camera looks down -Z, so the ring in
+            // the YZ plane genuinely has no width. What must never happen is a
+            // ring with no extent at all.
+            let extent = |f: fn(&(f32, f32)) -> f32| {
+                points.iter().map(f).fold(f32::MIN, f32::max)
+                    - points.iter().map(f).fold(f32::MAX, f32::min)
+            };
+            let spread = extent(|p| p.0).max(extent(|p| p.1));
+            assert!(spread > 1.0, "axis {axis} ring collapsed to a point: {spread} px");
+        }
+    }
+
+    /// The cursor grabs the ring it is on, and nothing when it is in open space.
+    #[test]
+    fn a_ring_is_grabbed_only_when_the_cursor_is_on_it() {
+        let rings = super::rings(&view(), Vec3::ZERO);
+        let (axis, points) = &rings[0];
+        assert_eq!(super::grab_ring(&rings, points[0]), Some(*axis));
+        assert_eq!(super::grab_ring(&rings, (-9000.0, -9000.0)), None);
+    }
+
     use super::*;
 
     #[test]

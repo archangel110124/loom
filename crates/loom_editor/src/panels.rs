@@ -184,6 +184,8 @@ pub struct PanelState<'a> {
     /// camera in `loom_cli` and this crate stays a pure function of what it is
     /// handed. Twelve segments per selected node, in window pixels.
     pub selection_edges: &'a [Segment],
+    /// Rotation rings in window pixels, drawn in Rotate mode — ADR 0099.
+    pub rings: &'a [(usize, Vec<(f32, f32)>)],
     /// Gizmo handles in **window pixels**, as the viewport computed them.
     pub handles: &'a [Handle],
     /// The **axis** being dragged, so its handle can be drawn as grabbed.
@@ -1471,7 +1473,11 @@ pub(crate) fn selection_overlay(
     }
 }
 
-pub(crate) fn gizmo_overlay(root: &mut egui::Ui, state: &PanelState<'_>) {
+pub(crate) fn gizmo_overlay(
+    root: &mut egui::Ui,
+    state: &PanelState<'_>,
+    clip: Option<egui::Rect>,
+) {
     if state.handles.is_empty() {
         return;
     }
@@ -1479,8 +1485,23 @@ pub(crate) fn gizmo_overlay(root: &mut egui::Ui, state: &PanelState<'_>) {
     // The viewport is the whole window; panels are drawn over it. So window
     // pixels map to egui points by the one scale factor, with no offset.
     let scale = ctx.pixels_per_point();
-    let painter = ctx.layer_painter(egui::LayerId::background());
+    let mut painter = ctx.layer_painter(egui::LayerId::background());
+    if let Some(rect) = clip {
+        painter.set_clip_rect(rect);
+    }
     let point = |(x, y): (f32, f32)| egui::pos2(x / scale, y / scale);
+
+    // **The rings first, under the handles.** In Rotate mode they are the
+    // thing you aim at; the axis caps still sit on top so the colours agree.
+    for (axis, points) in state.rings {
+        let colour = AXIS_COLORS[*axis];
+        for pair in points.windows(2) {
+            painter.line_segment(
+                [point(pair[0]), point(pair[1])],
+                egui::Stroke::new(2.0, colour),
+            );
+        }
+    }
 
     for handle in state.handles {
         let grabbed = state.dragging == Some(handle.axis);

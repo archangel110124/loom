@@ -357,7 +357,7 @@ impl Dock {
         // fault rather than a selection.
         let clip = hole.filter(egui::Rect::is_positive);
         panels::selection_overlay(root, state, clip);
-        panels::gizmo_overlay(root, state);
+        panels::gizmo_overlay(root, state, clip);
         panels::agent_overlay(root, state);
         actions
     }
@@ -736,6 +736,7 @@ mod tests {
                 registry: &registry,
                 mode: crate::gizmo::Mode::Move,
                 selection_edges: &[],
+            rings: &[],
             handles: &[],
                 dragging: None,
                 fps: 60.0,
@@ -792,6 +793,7 @@ mod tests {
                 registry: &registry,
                 mode: crate::gizmo::Mode::Move,
                 selection_edges: &[],
+            rings: &[],
             handles: &[],
                 dragging: None,
                 fps: 60.0,
@@ -847,6 +849,7 @@ mod tests {
             registry: &registry,
             mode: crate::gizmo::Mode::Move,
             selection_edges: &[],
+            rings: &[],
             handles: &[],
             dragging: None,
             fps: 60.0,
