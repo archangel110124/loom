@@ -777,7 +777,11 @@ pub(crate) fn inspector(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
         return;
     };
 
-    let editable_now = state.editable && state.playing.is_none();
+    // **Fields stay live while playing — ADR 0099.** Tuning a buoyancy force
+    // while watching the boat is the loop this editor existed without. The name
+    // is the exception: renaming a node mid-run would rebuild the world around
+    // a path the simulation is holding.
+    let editable_now = state.editable;
     let short = path.rsplit('/').next().unwrap_or(path);
     // **The buffer has to outlive the frame.** It used to be rebuilt
     // from the node's name every frame, so each typed character was
@@ -793,7 +797,7 @@ pub(crate) fn inspector(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
     ui.horizontal(|ui| {
         ui.label("name");
         let response = ui.add_enabled(
-            editable_now,
+            editable_now && state.playing.is_none(),
             egui::TextEdit::singleline(&mut renamed).desired_width(180.0),
         );
         if response.changed() {
@@ -1782,6 +1786,17 @@ fn draw_field(
             );
             let widget = match bounds {
                 (Some(lo), Some(hi)) => {
+                    // **The empty half of the track has to be visible.**
+                    // `slider_trailing_fill` paints only the part left of the
+                    // handle, and the rest was `sunken` — 0x0F1216 against a
+                    // panel barely lighter, so a slider near the bottom of its
+                    // range read as a stray mark and one at zero as nothing at
+                    // all. `Environment.ambient` is 0.45 of 0..4: eleven per
+                    // cent lit, and the other 89% invisible.
+                    let track = crate::theme::tokens(false).line_strong;
+                    ui.visuals_mut().widgets.inactive.bg_fill = track;
+                    ui.visuals_mut().widgets.hovered.bg_fill = track;
+                    ui.visuals_mut().widgets.active.bg_fill = track;
                     ui.add_enabled(editable, egui::Slider::new(&mut v, lo..=hi))
                 }
                 _ => ui.add_enabled(editable, egui::DragValue::new(&mut v).speed(0.1)),
@@ -2036,6 +2051,40 @@ fn array_of_objects(
                     .and_then(serde_json::Value::as_str)
                     .map_or_else(|| format!("[{index}]"), |k| format!("[{index}] {k}"));
                 ui.label(egui::RichText::new(title).monospace());
+                // **Move controls on the row they move** — ADR 0099. A separate
+                // row of "0 up / 1 up / 2 up" buttons was functional and unlike
+                // any editor anyone has used.
+                if editable && items.len() > 1 {
+                    let mut swap = None;
+                    if ui
+                        .add_enabled(index > 0, egui::Button::new("^").small())
+                        .on_hover_text("move up")
+                        .clicked()
+                    {
+                        swap = Some(index - 1);
+                    }
+                    if ui
+                        .add_enabled(index + 1 < items.len(), egui::Button::new("v").small())
+                        .on_hover_text("move down")
+                        .clicked()
+                    {
+                        swap = Some(index + 1);
+                    }
+                    if let Some(with) = swap {
+                        // The whole array in one op: remove-then-insert is two
+                        // splices whose indices shift under each other, and two
+                        // undo steps for one click.
+                        let mut reordered = items.to_vec();
+                        reordered.swap(index, with);
+                        actions.push(UiAction::Splice(
+                            path.to_owned(),
+                            key.to_owned(),
+                            0,
+                            items.len(),
+                            reordered,
+                        ));
+                    }
+                }
                 if editable
                     && ui.small_button("✖").on_hover_text("remove this entry").clicked()
                 {
@@ -2066,32 +2115,6 @@ fn array_of_objects(
                         ));
                     }
                 });
-        }
-        // **Reorder rewrites the whole array in one op**, because moving an
-        // entry by removing and re-inserting is two splices whose indices shift
-        // under each other — and two undo steps for one gesture.
-        if editable && items.len() > 1 {
-            ui.horizontal(|ui| {
-                ui.weak("move");
-                for index in 0..items.len() {
-                    if ui
-                        .small_button(format!("{index} up"))
-                        .on_hover_text("swap with the entry above")
-                        .clicked()
-                        && index > 0
-                    {
-                        let mut reordered = items.to_vec();
-                        reordered.swap(index, index - 1);
-                        actions.push(UiAction::Splice(
-                            path.to_owned(),
-                            key.to_owned(),
-                            0,
-                            items.len(),
-                            reordered,
-                        ));
-                    }
-                }
-            });
         }
         if editable && ui.small_button("+ add").clicked() {
             // A new entry at the schema's defaults, which for an untyped

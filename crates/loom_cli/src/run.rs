@@ -675,6 +675,9 @@ struct App {
     hierarchy_filter: String,
     /// Nodes whose children are folded away — ADR 0098.
     collapsed: std::collections::BTreeSet<String>,
+    /// Where the last pick landed, so clicking the same spot cycles through
+    /// what is stacked there — ADR 0099.
+    last_pick: Option<(f32, f32)>,
     /// What is wrong with the scene, recomputed on change — ADR 0093.
     problems: Vec<loom_editor::Problem>,
     /// Every edit from outside this window, newest last — ADR 0093.
@@ -930,6 +933,7 @@ impl App {
             view_mode: loom_render::ablate::ViewMode::default(),
             hierarchy_filter: String::new(),
             collapsed: std::collections::BTreeSet::new(),
+            last_pick: None,
             clipboard: Vec::new(),
             scenes: Vec::new(),
             problems: Vec::new(),
@@ -3094,6 +3098,7 @@ impl App {
             Ok(_) => {
                 self.dirty = true;
                 self.resync();
+                self.reapply_to_play();
             }
             // A dragged slider can leave the schema's range mid-drag; the
             // rejection is correct, and the console collapses the repeats.
@@ -3691,13 +3696,41 @@ impl App {
         let projection = self.projection();
         let dir = projection.ray(self.cursor.0, self.cursor.1);
 
-        let mut best: Option<(f32, &String)> = None;
-        for (path, bounds) in &self.view.picks {
-            if let Some(t) = ray_box(projection.eye(), dir, bounds)
-                && best.is_none_or(|(d, _)| t < d)
-            {
-                best = Some((t, path));
-            }
+        // **Every hit along the ray, nearest first** — ADR 0099. One nearest
+        // box is wrong the moment two things overlap, which in a 260-node scene
+        // is most of the screen: a crate inside a hold, a lamp against a wall,
+        // a mesh leaf inside the character that owns it. Picking is a ray
+        // against AABBs (`ponytail:` above), so the *nearest* answer is often
+        // the box that merely encloses what you meant.
+        let mut hits: Vec<(f32, &String)> = self
+            .view
+            .picks
+            .iter()
+            .filter_map(|(path, bounds)| {
+                ray_box(projection.eye(), dir, bounds).map(|t| (t, path))
+            })
+            .collect();
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        // **Clicking the same spot again takes the next one down.** That is how
+        // you reach the thing inside the box without hunting the hierarchy, and
+        // it is the cheap half of pixel-accurate picking: the expensive half is
+        // an ID buffer and a readback, and this removes most of the reason to
+        // want one.
+        let same_spot = self
+            .last_pick
+            .is_some_and(|(x, y)| (x - self.cursor.0).abs() < 3.0 && (y - self.cursor.1).abs() < 3.0);
+        let start = if same_spot {
+            hits.iter()
+                .position(|(_, path)| self.selected.first() == Some(*path))
+                .map_or(0, |at| (at + 1) % hits.len().max(1))
+        } else {
+            0
+        };
+        self.last_pick = Some(self.cursor);
+        let best = hits.get(start).or_else(|| hits.first()).copied();
+        if hits.len() > 1 && same_spot {
+            crate::log::info(format!("{} of {} under the cursor", start + 1, hits.len()));
         }
 
         let extend = self.input.is_active(&self.bindings, EDIT, "extend");
@@ -3782,6 +3815,40 @@ impl App {
         self.problems = problems;
     }
 
+
+
+    /// Carry an edit made during Play into the running game — ADR 0099.
+    ///
+    /// **Rebuild and restore, rather than patch the world.** Everything derived
+    /// is cached when Play starts: `Sim::new` walks the world once and keeps
+    /// `characters`, `floating` and `propelled`, and the weather stages live on
+    /// the runner. Writing a changed field into the live world would therefore
+    /// do nothing for almost every component — a knob that moves and changes
+    /// not one thing, which is worse than a knob that is greyed out.
+    ///
+    /// So the edit goes to the scene the normal way, Play is rebuilt from the
+    /// edited scene, and the simulation is put back with the ADR 0088 snapshot —
+    /// the same save/restore the CLI uses and the gate proves byte-exact. The
+    /// boat keeps its position, velocity, wake, thrust and script memory, and
+    /// starts obeying the new number on the next tick.
+    ///
+    /// **A transform edit is the one that will not stick**, because the snapshot
+    /// restores where things *were*: move a node during Play and the running
+    /// world puts it back. Tuning a parameter is the case this exists for.
+    fn reapply_to_play(&mut self) {
+        let Some(old) = self.play.as_ref() else {
+            return;
+        };
+        let ticks = old.ticks;
+        let snapshot = old.save_game(u64::from(ticks));
+
+        let world = loom_ecs::World::from_scene(&self.view.scene);
+        let mut play = crate::play::Play::start(world, &self.base);
+        play.load_game(&snapshot);
+        play.ticks = ticks;
+        self.play = Some(play);
+        self.refresh_play_objects();
+    }
 
     /// Where a game saved from the editor lands — ADR 0098.
     ///
