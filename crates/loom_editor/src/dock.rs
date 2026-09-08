@@ -297,6 +297,27 @@ impl Dock {
         }
     }
 
+    /// Bring a tab to the front of whatever group it is in — ADR 0100.
+    ///
+    /// **So a screenshot can show a panel that is not the default.** Every
+    /// other way into the editor is now reachable without a mouse; the tab
+    /// itself was the last thing that was not, which meant the Agent panel —
+    /// the one that matters most — could not be checked by anything but a
+    /// human clicking.
+    pub fn focus(&mut self, wanted: Tab) {
+        let found: Vec<egui_dock::TabPath> = self
+            .state
+            .iter_all_tabs()
+            .filter(|(_, tab)| **tab == wanted)
+            .map(|(path, _)| path)
+            .collect();
+        for path in found {
+            // A tab that has gone since the paths were collected is not an
+            // error worth reporting from a screenshot flag.
+            let _ = self.state.set_active_tab(path);
+        }
+    }
+
     /// Draw the toolbar, the dock and the overlays, and carve the viewport
     /// back out of `root`. See the module docs for what the carve is for.
     pub fn draw(&mut self, root: &mut egui::Ui, state: &PanelState<'_>) -> Vec<UiAction> {
@@ -736,11 +757,14 @@ mod tests {
                 snap: crate::gizmo::Snap::default(),
                 filter: "",
                 collapsed: &std::collections::BTreeSet::new(),
+                renaming: None,
                 view_mode: loom_render::ablate::ViewMode::default(),
                 problems: &problems,
                 scenes: &scenes,
                 open_scene: "assets/games/deeper_demo.loom",
                 agent_log: &agent_log,
+                agent_chat: &[],
+                agent_busy: false,
                 redo_history: &redo,
                 scene: &scene,
                 paths: &paths,
@@ -795,10 +819,13 @@ mod tests {
                 snap: crate::gizmo::Snap::default(),
                 filter,
                 collapsed: &std::collections::BTreeSet::new(),
+                renaming: None,
                 problems: &[],
                 scenes: &[],
                 open_scene: "",
                 agent_log: &[],
+            agent_chat: &[],
+            agent_busy: false,
                 redo_history: &[],
                 scene: &scene,
                 paths: &paths,
@@ -851,11 +878,14 @@ mod tests {
             snap: crate::gizmo::Snap::default(),
             filter: "",
             collapsed: &std::collections::BTreeSet::new(),
+            renaming: None,
             view_mode: loom_render::ablate::ViewMode::default(),
             problems: &[],
             scenes: &[],
             open_scene: "",
             agent_log: &[],
+            agent_chat: &[],
+            agent_busy: false,
             redo_history: &[],
             scene: &scene,
             paths: &[],

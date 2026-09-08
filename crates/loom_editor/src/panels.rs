@@ -60,6 +60,8 @@ pub enum UiAction {
     /// Open a different scene file — ADR 0093. Refused while there are
     /// unsaved edits.
     OpenScene(String),
+    /// Ask the agent for something — ADR 0100.
+    SendToAgent(String),
     /// Drop an asset into the viewport at these window pixels — ADR 0099.
     ///
     /// The alias, and where the cursor let go. The caller turns the point into
@@ -149,6 +151,16 @@ pub struct Problem {
     pub message: String,
 }
 
+/// One turn of the conversation with the agent — ADR 0100.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentTurn {
+    /// False when the human said it.
+    pub from_agent: bool,
+    pub text: String,
+    /// What was selected when it was asked.
+    pub about: Vec<String>,
+}
+
 /// One edit somebody else made to the scene — ADR 0093.
 ///
 /// **The marks over the viewport fade after six seconds**, which is right for
@@ -201,6 +213,8 @@ pub struct PanelState<'a> {
     pub filter: &'a str,
     /// Nodes whose children are folded away — ADR 0098.
     pub collapsed: &'a std::collections::BTreeSet<String>,
+    /// The node being renamed in place, if any — ADR 0100.
+    pub renaming: Option<&'a str>,
     /// What the viewport is drawing — ADR 0097.
     pub view_mode: loom_render::ablate::ViewMode,
     /// What is wrong with the scene, recomputed when it changes — ADR 0093.
@@ -211,6 +225,10 @@ pub struct PanelState<'a> {
     pub open_scene: &'a str,
     /// What somebody else changed, newest first, kept after the marks fade.
     pub agent_log: &'a [AgentEdit],
+    /// The conversation with the agent, oldest first — ADR 0100.
+    pub agent_chat: &'a [AgentTurn],
+    /// True while a request of ours has no answer yet.
+    pub agent_busy: bool,
     /// Labels of transactions that were undone and can be redone, newest last.
     pub redo_history: &'a [String],
     /// The selection's bounding box, as screen-space edges — ADR 0099.
@@ -726,6 +744,34 @@ pub(crate) fn hierarchy(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
                 // The op layer refuses cycles and name collisions, so
                 // an impossible drop is rejected with a reason rather
                 // than prevented by duplicated rules here.
+                // **Renaming happens where the name is** — ADR 0100. F2 turns
+                // the row into a field; the inspector's name box still works
+                // and is the same op, but nobody looks there to rename a node
+                // they are looking at.
+                if state.renaming == Some(path.as_str()) {
+                    let buffer_id = egui::Id::new(("hierarchy_rename", path));
+                    let mut text: String = ui
+                        .data_mut(|d| d.get_temp::<String>(buffer_id))
+                        .unwrap_or_else(|| name.to_owned());
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut text).desired_width(160.0),
+                    );
+                    field.request_focus();
+                    if field.changed() {
+                        ui.data_mut(|d| d.insert_temp(buffer_id, text.clone()));
+                    }
+                    let done = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    if done && !text.trim().is_empty() && text.trim() != name {
+                        actions.push(UiAction::Rename(path.clone(), text.trim().to_owned()));
+                    }
+                    if done || cancelled {
+                        ui.data_mut(|d| d.remove::<String>(buffer_id));
+                        actions.push(UiAction::BeginRename(String::new()));
+                    }
+                    return;
+                }
+
                 let id = egui::Id::new(("hierarchy", path));
                 let response = ui
                     .dnd_drag_source(id, path.clone(), |ui| {
@@ -787,6 +833,10 @@ pub(crate) fn hierarchy(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
                                 extend: false,
                             });
                             actions.push(UiAction::Duplicate);
+                            ui.close();
+                        }
+                        if ui.button("Rename").clicked() {
+                            actions.push(UiAction::BeginRename(path.clone()));
                             ui.close();
                         }
                         if ui.button("Copy").clicked() {
@@ -1378,6 +1428,82 @@ pub(crate) fn status_bar(root: &mut egui::Ui, state: &PanelState<'_>) {
 pub(crate) fn agent(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
     ui.heading("Agent");
     ui.separator();
+
+    // **The half that was missing** — ADR 0100. The agent could already change
+    // the scene and have it appear here within 250 ms; there was no way to ask
+    // it for anything. This is that way.
+    let id = ui.id().with("agent_prompt");
+    let mut prompt: String = ui.data(|d| d.get_temp(id).unwrap_or_default());
+    let send = |actions: &mut Vec<UiAction>, ui: &egui::Ui, text: &str| {
+        if !text.trim().is_empty() {
+            actions.push(UiAction::SendToAgent(text.trim().to_owned()));
+            ui.data_mut(|d| d.remove::<String>(id));
+        }
+    };
+
+    ui.horizontal(|ui| {
+        // What the request will be about, said out loud — "make it sit lower"
+        // means nothing without this, and a human should see what the agent
+        // will see.
+        match state.selected {
+            [] => ui.weak("about: the whole scene"),
+            [one] => ui.weak(format!("about: {one}")),
+            many => ui.weak(format!("about: {} nodes", many.len())),
+        };
+    });
+    let field = ui.add(
+        egui::TextEdit::multiline(&mut prompt)
+            .hint_text("ask for a change — the agent edits the scene and you watch it happen")
+            .desired_rows(2)
+            .desired_width(f32::INFINITY),
+    );
+    if field.changed() {
+        ui.data_mut(|d| d.insert_temp(id, prompt.clone()));
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!prompt.trim().is_empty(), egui::Button::new("Send"))
+            .clicked()
+        {
+            send(actions, ui, &prompt);
+        }
+        // Ctrl+Enter sends, because the field takes plain Enter for newlines.
+        if field.has_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl)
+        {
+            send(actions, ui, &prompt);
+        }
+        ui.weak("Ctrl+Enter");
+        if state.agent_busy {
+            ui.spinner();
+            ui.weak("waiting for a reply");
+        }
+    });
+    ui.separator();
+
+    if !state.agent_chat.is_empty() {
+        egui::ScrollArea::vertical()
+            .id_salt("agent_chat")
+            .max_height(220.0)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for turn in state.agent_chat {
+                    let (who, colour) = if turn.from_agent {
+                        ("agent", crate::theme::tokens(false).agent)
+                    } else {
+                        ("you", crate::theme::tokens(false).text_strong)
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(colour, who);
+                        ui.label(&turn.text);
+                    });
+                    if !turn.about.is_empty() && !turn.from_agent {
+                        ui.weak(format!("   about {}", turn.about.join(", ")));
+                    }
+                }
+            });
+        ui.separator();
+    }
 
     if state.agent_log.is_empty() {
         ui.weak("no edits from outside this window yet");
@@ -2213,6 +2339,47 @@ fn object_fields(
     changed.then_some(serde_json::Value::Object(edited))
 }
 
+/// Where a new entry goes in an array the format keeps sorted — ADR 0101.
+///
+/// **Appending to `Environment.stages` always failed.** Its entries carry an
+/// `at` on 0..=1 and must be strictly increasing, so "+ add" put a default
+/// entry with `at = 0` after one with `at = 1` and the op layer refused it,
+/// every time, on every scene. The button was not broken so much as
+/// permanently wrong, and the console said `sorted by at, strictly increasing`
+/// while the human looked at a list that would not grow.
+///
+/// So: find the widest gap between neighbouring values — counting the run from
+/// 0 to the first and from the last to 1 — and put the new entry in the middle
+/// of it. That is both always valid and what somebody adding a stage means: a
+/// new one between the ones already there.
+///
+/// `None` when the entries carry no `at`, which is every other array and where
+/// appending is right.
+#[must_use]
+pub fn sorted_insertion(items: &[serde_json::Value]) -> Option<(usize, f64)> {
+    let ats: Vec<f64> = items
+        .iter()
+        .map(|item| item.get("at").and_then(serde_json::Value::as_f64))
+        .collect::<Option<Vec<_>>>()?;
+    if ats.is_empty() {
+        return Some((0, 0.0));
+    }
+
+    // Every gap, including the ends, as (index to insert at, low, high).
+    let mut gaps = vec![(0usize, 0.0, ats[0])];
+    for (i, pair) in ats.windows(2).enumerate() {
+        gaps.push((i + 1, pair[0], pair[1]));
+    }
+    gaps.push((ats.len(), ats[ats.len() - 1], 1.0));
+
+    let (index, low, high) = gaps
+        .into_iter()
+        .max_by(|a, b| (a.2 - a.1).total_cmp(&(b.2 - b.1)))?;
+    // A zero-width gap has no room; the caller gets the midpoint anyway and the
+    // op layer refuses it, which is the honest outcome for a full array.
+    Some((index, f64::midpoint(low, high)))
+}
+
 fn array_of_objects(
     ui: &mut egui::Ui,
     path: &str,
@@ -2304,11 +2471,19 @@ fn array_of_objects(
             // recipe is an empty table the human then fills in. Appending
             // something invalid would be worse: the transaction would be
             // rejected and the button would look broken.
-            let blank = default_entry(schema);
+            let mut blank = default_entry(schema);
+            // A sorted array gets the entry placed, not appended — ADR 0101.
+            let at = sorted_insertion(items);
+            if let Some((_, value)) = at
+                && let Some(object) = blank.as_object_mut()
+                && let Some(number) = serde_json::Number::from_f64(value)
+            {
+                object.insert("at".to_owned(), serde_json::Value::Number(number));
+            }
             actions.push(UiAction::Splice(
                 path.to_owned(),
                 key.to_owned(),
-                items.len(),
+                at.map_or(items.len(), |(index, _)| index),
                 0,
                 vec![blank],
             ));
@@ -2372,6 +2547,59 @@ impl egui::Widget for ColourButton<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::sorted_insertion;
+
+    /// **The add button that always failed.** `Environment.stages` runs
+    /// 0.0, 0.25, 0.5, 0.8, 1.0 and must be strictly increasing; appending a
+    /// default entry put `at = 0` after `at = 1` and the op layer refused it
+    /// on every scene, every time.
+    #[test]
+    fn a_new_stage_lands_in_the_widest_gap() {
+        let stages: Vec<serde_json::Value> = [0.0, 0.25, 0.5, 0.8, 1.0]
+            .iter()
+            .map(|at| serde_json::json!({ "at": at }))
+            .collect();
+        let (index, at) = sorted_insertion(&stages).expect("these carry an at");
+        // The widest run is 0.5..0.8; 0.25..0.5 and 0.0..0.25 are narrower.
+        assert_eq!(index, 3, "between 0.5 and 0.8");
+        assert!((at - 0.65).abs() < 1e-9, "{at}");
+
+        // And the result is still strictly increasing.
+        let mut values: Vec<f64> = stages
+            .iter()
+            .filter_map(|s| s.get("at").and_then(serde_json::Value::as_f64))
+            .collect();
+        values.insert(index, at);
+        assert!(
+            values.windows(2).all(|w| w[0] < w[1]),
+            "still sorted: {values:?}"
+        );
+    }
+
+    /// The ends count as gaps, or a run that stops early can never be extended.
+    #[test]
+    fn the_room_after_the_last_stage_is_a_gap() {
+        let stages = vec![serde_json::json!({ "at": 0.0 }), serde_json::json!({ "at": 0.1 })];
+        let (index, at) = sorted_insertion(&stages).expect("carries an at");
+        assert_eq!(index, 2, "after the last, where the room is");
+        assert!(at > 0.1 && at < 1.0, "{at}");
+    }
+
+    /// An empty array starts at the beginning.
+    #[test]
+    fn the_first_stage_starts_at_zero() {
+        assert_eq!(sorted_insertion(&[]), Some((0, 0.0)));
+    }
+
+    /// **Every other array still appends.** Pontoons and voxel ops carry no
+    /// `at` and have no order to keep; inventing one would move entries a human
+    /// deliberately arranged.
+    #[test]
+    fn an_unsorted_array_is_left_alone() {
+        let pontoons = vec![serde_json::json!({ "radius": 1.0 })];
+        assert_eq!(sorted_insertion(&pontoons), None);
+    }
+
 
     use super::{PanelState, fields_editable, structure_editable};
 
@@ -2416,6 +2644,9 @@ mod tests {
             scenes: &[],
             open_scene: "",
             agent_log: &[],
+            agent_chat: &[],
+            agent_busy: false,
+            renaming: None,
             redo_history: &[],
             selection_edges: &[],
             rings: &[],
@@ -2479,6 +2710,9 @@ mod tests {
             scenes: &[],
             open_scene: "",
             agent_log: &[],
+            agent_chat: &[],
+            agent_busy: false,
+            renaming: None,
             redo_history: &[],
             selection_edges: &[],
             rings: &[],

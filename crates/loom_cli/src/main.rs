@@ -10,6 +10,7 @@
 //! parser dependency. Switch to `clap` when M9 lands `scene place/measure/...`
 //! and the count goes past four — `run` is the seam, so it is a local change.
 
+mod agent_link;
 mod hud;
 mod imagediff;
 mod log;
@@ -77,6 +78,16 @@ USAGE:
         --rect also reports the mean R, G and B of that crop in BOTH images,
         which is the question a hue acceptance test asks and the diff cannot
         answer: whether the water in a named band is turquoise or grey.
+
+    loom agent inbox <scene.loom>
+        What the human has asked the agent for and nobody has answered yet, as
+        JSON: id, text, and the nodes that were selected when they asked. The
+        editor writes these when somebody types in its Agent panel.
+
+    loom agent reply <scene.loom> --id <n> [--text <...>]
+        Answer one. The editor shows it in the conversation. Do the actual work
+        with `loom scene --tx`; the editor is watching the file and will show
+        the change within 250 ms.
 
     loom pack <assets-dir> <out.pack>
         Fold an asset tree into one file. A binary with `assets.pack` beside it
@@ -288,10 +299,11 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
             ("--size", true), ("--steps", true),
         ],
     ),
+    ("agent", &[("--id", true), ("--text", true)]),
     ("run", &[
         ("--edit", false), ("--frames", true), ("--play", false),
         ("--shot", true), ("--hold", true), ("--menu", false),
-        ("--select", true), ("--mode", true),
+        ("--select", true), ("--mode", true), ("--tab", true),
     ]),
 ];
 
@@ -311,10 +323,11 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
 fn unknown_flag(command: &str, args: &[String]) -> Option<(String, Vec<&'static str>)> {
     let allowed = FLAGS.iter().find(|(name, _)| *name == command)?.1;
 
-    // args[0] is the path or type name; flags follow. `compare` is the only
-    // subcommand in the table with a second subject (it diffs two PNGs), so it
-    // is one line rather than a column every other row would carry as `1`.
-    let mut i = if command == "compare" { 2 } else { 1 };
+    // args[0] is the path or type name; flags follow. Two commands carry a
+    // second subject: `compare` diffs two PNGs, and `agent` takes a verb and
+    // then the scene — one line each rather than a column every other row
+    // would carry as `1`.
+    let mut i = if matches!(command, "compare" | "agent" | "pack") { 2 } else { 1 };
     while i < args.len() {
         let arg = args[i].as_str();
         if let Some((_, takes_value)) = allowed.iter().find(|(name, _)| *name == arg) {
@@ -397,6 +410,12 @@ fn run(args: &[String]) -> (u8, String) {
             Some(path) => sim(path, args),
             None => (2, USAGE.to_owned()),
         },
+        // **The agent's half of the editor's conversation** — ADR 0100.
+        Some("agent") => match (args.get(1).map(String::as_str), args.get(2)) {
+            (Some("inbox"), Some(scene)) => agent_inbox(scene),
+            (Some("reply"), Some(scene)) => agent_reply(scene, args),
+            _ => (2, USAGE.to_owned()),
+        },
         Some("pack") => match (args.get(1), args.get(2)) {
             (Some(dir), Some(out)) => pack(dir, out, flag(args, "--from").as_deref()),
             _ => (2, USAGE.to_owned()),
@@ -469,6 +488,7 @@ fn run(args: &[String]) -> (u8, String) {
                     menu: args.iter().any(|a| a == "--menu"),
                     select: flag(args, "--select"),
                     mode: flag(args, "--mode"),
+                    tab: flag(args, "--tab"),
                 };
                 match run::open_scene(
                     path,
@@ -6595,6 +6615,43 @@ fn pack(dir: &str, out: &str, from: Option<&str>) -> (u8, String) {
             1,
             json_line(&serde_json::json!({
                 "error": "io_error", "path": out, "constraint": e.to_string(),
+            })),
+        ),
+    }
+}
+
+/// What the human has asked for and nobody has answered — ADR 0100.
+fn agent_inbox(scene: &str) -> (u8, String) {
+    let waiting: Vec<serde_json::Value> = agent_link::pending(std::path::Path::new(scene))
+        .into_iter()
+        .map(|m| {
+            serde_json::json!({ "id": m.id, "text": m.text, "about": m.about })
+        })
+        .collect();
+    (
+        0,
+        json_line(&serde_json::json!({ "scene": scene, "pending": waiting })),
+    )
+}
+
+/// Answer one of them — ADR 0100.
+fn agent_reply(scene: &str, args: &[String]) -> (u8, String) {
+    let Some(id) = flag(args, "--id").and_then(|v| v.parse::<u64>().ok()) else {
+        return (
+            2,
+            json_line(&serde_json::json!({
+                "error": "missing_flag", "value": "--id",
+                "constraint": "the id of the request being answered",
+            })),
+        );
+    };
+    let text = flag(args, "--text").unwrap_or_default();
+    match agent_link::reply(std::path::Path::new(scene), id, &text) {
+        Ok(()) => (0, json_line(&serde_json::json!({ "replied": id }))),
+        Err(e) => (
+            1,
+            json_line(&serde_json::json!({
+                "error": "io_error", "path": scene, "constraint": e.to_string(),
             })),
         ),
     }

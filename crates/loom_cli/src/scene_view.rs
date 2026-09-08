@@ -281,11 +281,12 @@ impl SceneView {
         self.world.active_camera()
     }
 
-    /// The world AABB of a node, if it draws anything.
-    #[must_use]
-    pub fn node_bounds(&self, path: &str) -> Option<&loom_scene::place::Bounds> {
-        self.picks.get(path)
-    }
+    // **`node_bounds` was removed deliberately.** It answered "what does this
+    // node draw", and three callers wanted "what does this node and everything
+    // under it draw" — the gizmo, the focus key and the agent marks all had
+    // the same bug, because a rig node draws nothing and they all silently got
+    // `None`. `App::subtree_bounds` is the question they were asking. Read
+    // `picks` directly if you truly want one node's own box.
 
     /// A node's local transform, read back from the scene rather than tracked
     /// separately — a second copy of the truth is a second answer.

@@ -309,6 +309,8 @@ pub struct Script {
     /// Same reason as `select`: the rotation rings only exist in Rotate mode,
     /// so without this no screenshot and no gate row could ever see them.
     pub mode: Option<String>,
+    /// Which tab to bring to the front — ADR 0100. The last mouse-only thing.
+    pub tab: Option<String>,
 }
 
 impl Script {
@@ -700,6 +702,13 @@ struct App {
     /// Where the last pick landed, so clicking the same spot cycles through
     /// what is stacked there — ADR 0099.
     last_pick: Option<(f32, f32)>,
+    /// The node being renamed in the hierarchy, if any — ADR 0100.
+    renaming: Option<String>,
+    /// The conversation with the agent, re-read whenever the scene is polled —
+    /// ADR 0100.
+    agent_chat: Vec<loom_editor::AgentTurn>,
+    /// True while something we asked has no answer yet.
+    agent_busy: bool,
     /// Rotation rings in window pixels, recomputed with the handles so a press
     /// hit-tests exactly what was drawn — ADR 0099.
     rings: Vec<(usize, Vec<(f32, f32)>)>,
@@ -961,6 +970,9 @@ impl App {
             hierarchy_filter: String::new(),
             collapsed: std::collections::BTreeSet::new(),
             last_pick: None,
+            renaming: None,
+            agent_chat: Vec::new(),
+            agent_busy: false,
             rings: Vec::new(),
             planes: Vec::new(),
             clipboard: Vec::new(),
@@ -1044,9 +1056,14 @@ impl App {
         for (change, at) in &self.agent_changes {
             // A removed node has no bounds left to point at; the console line
             // is the only honest thing to show for it.
-            let Some(bounds) = self.view.node_bounds(&change.path) else {
+            //
+            // **Subtree bounds, so a rig node is markable.** An agent editing
+            // `Rig/Boat` drew no mark at all, because the node it named has no
+            // mesh of its own — the change happened and nothing pointed at it.
+            let Some((lo, hi)) = self.subtree_bounds(&change.path) else {
                 continue;
             };
+            let bounds = loom_scene::place::Bounds { min: lo.to_array(), max: hi.to_array() };
             let (mut x0, mut y0) = (f32::MAX, f32::MAX);
             let (mut x1, mut y1) = (f32::MIN, f32::MIN);
             let mut visible = false;
@@ -1298,6 +1315,8 @@ impl App {
             return;
         }
         self.next_watch = now + WATCH_INTERVAL;
+        // The conversation, on the same beat as the file — ADR 0100.
+        self.refresh_agent_chat();
 
         let Ok(disk) = std::fs::read_to_string(&self.scene_path) else {
             return;
@@ -1407,9 +1426,13 @@ impl App {
         let mut max = Vec3::splat(f32::MIN);
         let mut any = false;
         for path in &self.selected {
-            if let Some(b) = self.view.node_bounds(path) {
-                min = min.min(Vec3::from_array(b.min));
-                max = max.max(Vec3::from_array(b.max));
+            // **The subtree, not the node** — the same fix the gizmo needed.
+            // A rig node carries a transform and no mesh, so framing its own
+            // bounds found nothing and fell through to the whole scene: F on
+            // `Rig/Boat` framed the harbour instead of the boat.
+            if let Some((lo, hi)) = self.subtree_bounds(path) {
+                min = min.min(lo);
+                max = max.max(hi);
                 any = true;
             }
         }
@@ -1494,6 +1517,13 @@ impl ApplicationHandler for App {
                         if self.session.is_some() || !self.autoplay {
                             self.dock =
                                 Some(loom_editor::Dock::new(self.frames_left.is_none(), height));
+                            // An asked-for tab, once the dock exists.
+                            if let (Some(dock), Some(wanted)) =
+                                (self.dock.as_mut(), self.script.tab.as_deref())
+                                && let Some(tab) = loom_editor::Tab::from_title(wanted)
+                            {
+                                dock.focus(tab);
+                            }
                         }
                     }
                     Err(e) => crate::log::error(format!("no editor UI ({e}); continuing bare")),
@@ -1988,12 +2018,15 @@ impl ApplicationHandler for App {
                     cpu_ms: self.cpu_ms,
                     draw_ms: self.draw_ms,
                     agent_log: &agent_log,
+                    agent_chat: &self.agent_chat,
+                    agent_busy: self.agent_busy,
                     redo_history: self
                         .session
                         .as_ref()
                         .map_or(&[][..], loom_scene::edit::Session::redo_labels),
                     filter: &self.hierarchy_filter,
                     collapsed: &self.collapsed,
+                    renaming: self.renaming.as_deref(),
                     agent_marks: &marks,
                     console: &console,
                     overrides: &overrides,
@@ -2541,7 +2574,11 @@ impl App {
             UiAction::SetFilter(text) => self.hierarchy_filter = text,
             UiAction::SaveGame => self.save_game(),
             UiAction::LoadGame => self.load_game(),
-            UiAction::BeginRename(_) => {}
+            // Empty clears it — the panel says "done" that way rather than
+            // needing a second verb.
+            UiAction::BeginRename(path) => {
+                self.renaming = (!path.is_empty()).then_some(path);
+            }
             UiAction::ToggleCollapsed(path) => {
                 if !self.collapsed.remove(&path) {
                     self.collapsed.insert(path);
@@ -2566,6 +2603,7 @@ impl App {
             UiAction::AddPrefabInstance(key) => self.add_prefab_instance(&key),
             UiAction::CreatePrimitive(shape) => self.create_primitive(&shape),
             UiAction::OpenScene(path) => self.open_scene(&path),
+            UiAction::SendToAgent(text) => self.ask_agent(&text),
             UiAction::DropAsset { alias, at } => self.drop_asset(&alias, at),
             UiAction::NewScene => self.new_scene(),
             UiAction::SaveAs(name) => self.save_as(&name),
@@ -4155,6 +4193,40 @@ impl App {
     }
 
 
+
+    /// Ask the agent for something — ADR 0100.
+    ///
+    /// **The selection travels with the request.** "Make it sit lower" is not a
+    /// sentence about anything until it carries what was selected when it was
+    /// typed, and an agent reading the inbox has no other way to know.
+    fn ask_agent(&mut self, text: &str) {
+        match crate::agent_link::ask(&self.scene_path, text, &self.selected) {
+            Ok(id) => {
+                crate::log::info(format!("asked the agent (#{id}): {text}"));
+                self.refresh_agent_chat();
+            }
+            Err(e) => crate::log::error(format!("could not reach the agent: {e}")),
+        }
+    }
+
+    /// Re-read the conversation from disk — ADR 0100.
+    ///
+    /// Polled on the same tick as the scene file, because a reply and the edit
+    /// it describes arrive together and reading one without the other shows a
+    /// changed scene nobody explained.
+    fn refresh_agent_chat(&mut self) {
+        let turns = crate::agent_link::transcript(&self.scene_path);
+        self.agent_busy = !crate::agent_link::pending(&self.scene_path).is_empty();
+        self.agent_chat = turns
+            .into_iter()
+            .map(|m| loom_editor::AgentTurn {
+                from_agent: m.speaker == crate::agent_link::Speaker::Agent,
+                text: m.text,
+                about: m.about,
+            })
+            .collect();
+    }
+
     /// Where a game saved from the editor lands — ADR 0098.
     ///
     /// **Beside the scene, named after it.** No file dialog: this project has
@@ -4319,6 +4391,7 @@ impl App {
         let (duplicate, delete) = (act("duplicate"), act("delete"));
         let (copy, paste) = (act("copy"), act("paste"));
         let (select_all, deselect) = (act("select_all"), act("deselect"));
+        let rename_here = act("rename");
         let mode = if act("mode_move") {
             Some(Mode::Move)
         } else if act("mode_rotate") {
@@ -4350,6 +4423,9 @@ impl App {
             // is a state a human asks for — it is how you stop the gizmo
             // drawing over the thing you are looking at.
             self.selected.clear();
+        }
+        if rename_here {
+            self.renaming = self.selected.first().cloned();
         }
         if copy {
             self.copy_selection();
@@ -4611,6 +4687,15 @@ pub fn run(
     {
         app.selected = vec![wanted];
     }
+    // **Derived state, once, for the scene the editor opens on.** Both of these
+    // live in `show`, which runs when the scene *changes* — so on a freshly
+    // opened editor the Problems panel said "nothing to report" about a scene
+    // `loom validate` rejects, and the Project panel listed no scenes at all,
+    // until the human made an unrelated edit. Same shape as the `--select`
+    // flag: the first view is built before this struct exists.
+    app.recompute_problems();
+    app.scenes = app.sibling_scenes();
+    app.refresh_agent_chat();
     if let Some(wanted) = script.mode.as_deref() {
         app.mode = match wanted.to_ascii_lowercase().as_str() {
             "rotate" => Mode::Rotate,

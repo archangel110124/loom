@@ -17,3 +17,7 @@ render.png
 # `--out` lands one of these at the repo root. Harmless, and not content.
 telemetry.csv
 __pycache__/
+
+# The editor-to-agent conversation (ADR 0100) — a log beside the scene, not
+# scene data. Each machine has its own.
+.loom-agent/
