@@ -250,6 +250,25 @@ pub fn rings(view: &View, origin: Vec3) -> Vec<(usize, Vec<(f32, f32)>)> {
     out
 }
 
+/// Which way a ring turns for this viewpoint — ADR 0099.
+///
+/// **A ring seen from behind runs the other way.** The sweep is measured on
+/// screen, and screen angle relates to a rotation about a world axis only up to
+/// the side you are looking from: orbit past the plane and the same hand motion
+/// turns the object the opposite way, which is the classic rotation-gizmo bug
+/// and is invisible from the one viewpoint a fixed test uses.
+///
+/// `+1.0` when the axis points towards the eye, `-1.0` when it points away.
+#[must_use]
+pub fn ring_sign(view: &View, origin: Vec3, axis: usize) -> f32 {
+    let mut direction = Vec3::ZERO;
+    direction[axis] = 1.0;
+    let towards_object = (origin - view.eye()).normalize_or_zero();
+    // A positive dot means the axis points the same way the eye is looking —
+    // that is, away from the viewer.
+    if towards_object.dot(direction) > 0.0 { -1.0 } else { 1.0 }
+}
+
 /// Which ring the cursor is on, if any — ADR 0099.
 ///
 /// Nearest by distance to the polyline, within a few pixels, so the ring that
@@ -400,6 +419,47 @@ pub fn snap(value: f32, step: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The bug a single viewpoint cannot see.** Cross the rotation plane and
+    /// the same drag must still turn the object the way the hand went; without
+    /// the sign it counter-rotates, which is the thing every rotation gizmo
+    /// gets wrong once.
+    #[test]
+    fn a_ring_reverses_when_seen_from_the_other_side() {
+        let front = View::new(
+            &Camera {
+                eye: Vec3::new(0.0, 0.0, 10.0),
+                target: Vec3::ZERO,
+                fov_y_degrees: 60.0,
+            },
+            800.0,
+            600.0,
+        );
+        let behind = View::new(
+            &Camera {
+                eye: Vec3::new(0.0, 0.0, -10.0),
+                target: Vec3::ZERO,
+                fov_y_degrees: 60.0,
+            },
+            800.0,
+            600.0,
+        );
+        let z = 2;
+        let a = super::ring_sign(&front, Vec3::ZERO, z);
+        let b = super::ring_sign(&behind, Vec3::ZERO, z);
+        assert!((a * b) < 0.0, "the two sides must disagree: {a} and {b}");
+        assert!(a.abs() == 1.0 && b.abs() == 1.0, "a sign, not a scale");
+    }
+
+    /// An axis edge-on has no honest answer, and must still return a sign
+    /// rather than zero — a zero would freeze the drag instead of turning it.
+    #[test]
+    fn an_edge_on_axis_still_gives_a_sign() {
+        let view = view();
+        let sign = super::ring_sign(&view, Vec3::ZERO, 0);
+        assert!(sign.abs() == 1.0, "{sign}");
+    }
+
 
     /// **A drag across the wrap point must not spin the node a full turn.**
     /// atan2 steps from +pi to -pi at due west; taking the raw difference there

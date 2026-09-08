@@ -60,6 +60,10 @@ pub enum UiAction {
     /// Open a different scene file — ADR 0093. Refused while there are
     /// unsaved edits.
     OpenScene(String),
+    /// Start a new scene beside this one, named by the editor — ADR 0099.
+    NewScene,
+    /// Write the scene to another name beside this one — ADR 0099.
+    SaveAs(String),
     /// Create a node that draws something, in one step — ADR 0093.
     ///
     /// The mesh alias, which doubles as the name: `box`, `sphere`, `plane`,
@@ -93,6 +97,32 @@ pub enum UiAction {
     /// One tick, whether paused or not.
     StepOnce,
     Stop,
+}
+
+/// Whether a *value* can be edited — ADR 0099.
+///
+/// **True while playing.** Tuning a number and watching the result is the loop
+/// the editor existed without: the edit goes to the scene, `Play` is rebuilt
+/// from it, and the simulation is restored from the ADR 0088 snapshot, so the
+/// boat keeps its position and velocity and obeys the new number next tick.
+///
+/// This was written as a comment next to a gate that said the opposite, and
+/// shipped twice as done. Hence a named function and a test.
+#[must_use]
+pub fn fields_editable(state: &PanelState<'_>) -> bool {
+    state.editable
+}
+
+/// Whether the *shape* of the scene can be changed — ADR 0099.
+///
+/// **False while playing**, and this is the half that was backwards. Adding,
+/// deleting or reparenting a node during a run rebuilds the world underneath a
+/// simulation that is holding paths into it; the snapshot restore then puts
+/// back a world that no longer matches. Renaming is structural for the same
+/// reason.
+#[must_use]
+pub fn structure_editable(state: &PanelState<'_>) -> bool {
+    state.editable && state.playing.is_none()
 }
 
 /// A line in window pixels: where it starts, where it ends.
@@ -280,7 +310,7 @@ pub(crate) fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
             ui.label(egui::RichText::new("loom").strong());
             ui.separator();
 
-            let editing = state.editable && state.playing.is_none();
+            let editing = structure_editable(state);
             for mode in [Mode::Move, Mode::Rotate, Mode::Scale] {
                 if ui
                     .selectable_label(state.mode == mode, mode.label())
@@ -711,7 +741,11 @@ pub(crate) fn hierarchy(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
                         extend: ui.input(|i| i.modifiers.ctrl),
                     });
                 }
-                if state.editable {
+                // **Structural, so not while playing.** This was gated on
+                // `editable` alone, which left Delete, Duplicate, Reparent and
+                // Create reachable mid-run — the dangerous verbs open while the
+                // safe ones were locked.
+                if structure_editable(state) {
                     response.context_menu(|ui| {
                         // **The most common operation in a blockout editor,
                         // in one step.** It used to be three: add an empty
@@ -823,7 +857,8 @@ pub(crate) fn inspector(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
     });
     ui.label(egui::RichText::new(path).monospace().weak());
     ui.add_space(6.0);
-    let editing = state.editable && state.playing.is_none();
+    // Values, not shape — see `fields_editable`.
+    let editing = fields_editable(state);
 
     let empty = std::collections::BTreeSet::new();
     let ctx = FieldContext {
@@ -1113,7 +1148,7 @@ pub(crate) fn history(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut V
 pub(crate) fn menu_bar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
     egui::Panel::top("menubar").show(root, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
-            let editing = state.editable && state.playing.is_none();
+            let editing = structure_editable(state);
 
             ui.menu_button("File", |ui| {
                 if ui
@@ -1123,6 +1158,36 @@ pub(crate) fn menu_bar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mu
                     actions.push(UiAction::Save);
                     ui.close();
                 }
+                // **A name typed in the menu, not a file dialog.** Nothing in
+                // this project draws one, and adding a dependency to pick a
+                // filename would be the largest thing in the editor. Both of
+                // these write beside the scene that is open, which is where a
+                // human looking for them would go.
+                if ui
+                    .add_enabled(!state.dirty, egui::Button::new("New scene"))
+                    .on_hover_text("an empty scene beside this one")
+                    .clicked()
+                {
+                    actions.push(UiAction::NewScene);
+                    ui.close();
+                }
+                ui.menu_button("Save as", |ui| {
+                    let id = ui.id().with("save_as");
+                    let mut name: String = ui.data(|d| d.get_temp(id).unwrap_or_default());
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut name).hint_text("name.loom"),
+                    );
+                    if response.changed() {
+                        ui.data_mut(|d| d.insert_temp(id, name.clone()));
+                    }
+                    if ui
+                        .add_enabled(!name.trim().is_empty(), egui::Button::new("Save"))
+                        .clicked()
+                    {
+                        actions.push(UiAction::SaveAs(name.trim().to_owned()));
+                        ui.close();
+                    }
+                });
                 ui.separator();
                 ui.menu_button("Open scene", |ui| {
                     if state.scenes.is_empty() {
@@ -1623,7 +1688,9 @@ fn multi_inspector(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<
         ui.weak("no components in common");
         return;
     }
-    let editing = state.editable && state.playing.is_none();
+    // Values across a selection — live while playing, like the single
+    // inspector. See `fields_editable`.
+    let editing = fields_editable(state);
     let empty = std::collections::BTreeSet::new();
     let ctx = FieldContext { assets: state.assets, overridden: &empty };
 
@@ -2251,6 +2318,129 @@ impl egui::Widget for ColourButton<'_> {
 
 #[cfg(test)]
 mod tests {
+
+    use super::{PanelState, fields_editable, structure_editable};
+
+    /// **The gate that shipped broken twice.** A comment saying fields stay
+    /// live during Play sat directly above an expression disabling them, and
+    /// nothing tested either, so "done" was claimed on a feature that was inert.
+    ///
+    /// Values live while playing; shape does not. That distinction is the whole
+    /// point, and it is now a thing with a name rather than an expression
+    /// repeated at four call sites.
+    #[test]
+    fn values_stay_editable_while_playing_and_structure_does_not() {
+        let scene = loom_scene::Scene::parse("[scene]\nformat = 1\n\n[[node]]\nname = \"A\"\n")
+            .expect("a one-node scene");
+        let registry = loom_reflect::TypeRegistry::new();
+        // Bound outside the closure: the temporaries have to outlive the
+        // borrows in the struct.
+        let picks = std::collections::BTreeMap::new();
+        let collapsed = std::collections::BTreeSet::new();
+        let overrides = std::collections::BTreeMap::new();
+        let make = |playing: Option<(u32, bool, usize)>| PanelState {
+            playing,
+            editable: true,
+            scene: &scene,
+            paths: &[],
+            picks: &picks,
+            assets: &[],
+            object_count: 0,
+            selected: &[],
+            history: &[],
+            can_undo: false,
+            can_redo: false,
+            dirty: false,
+            conflict: false,
+            registry: &registry,
+            mode: crate::gizmo::Mode::Move,
+            snap: crate::gizmo::Snap::default(),
+            view_mode: loom_render::ablate::ViewMode::default(),
+            filter: "",
+            collapsed: &collapsed,
+            problems: &[],
+            scenes: &[],
+            open_scene: "",
+            agent_log: &[],
+            redo_history: &[],
+            selection_edges: &[],
+            rings: &[],
+            handles: &[],
+            dragging: None,
+            fps: 60.0,
+            cpu_ms: 1.0,
+            draw_ms: 2.0,
+            agent_marks: &[],
+            overrides: &overrides,
+            console: &[],
+            tick_seconds: 1.0 / 60.0,
+        };
+
+        let stopped = make(None);
+        assert!(fields_editable(&stopped));
+        assert!(structure_editable(&stopped));
+
+        let playing = make(Some((0, false, 0)));
+        assert!(
+            fields_editable(&playing),
+            "tuning a value is the reason play mode is worth having"
+        );
+        assert!(
+            !structure_editable(&playing),
+            "deleting a node the simulation is holding is not a tuning knob"
+        );
+    }
+
+    /// Read-only means read-only, playing or not.
+    #[test]
+    fn nothing_is_editable_in_a_read_only_session() {
+        let scene = loom_scene::Scene::parse("[scene]\nformat = 1\n\n[[node]]\nname = \"A\"\n")
+            .expect("a one-node scene");
+        let registry = loom_reflect::TypeRegistry::new();
+        let picks = std::collections::BTreeMap::new();
+        let collapsed = std::collections::BTreeSet::new();
+        let overrides = std::collections::BTreeMap::new();
+        let state = PanelState {
+            editable: false,
+            playing: None,
+            scene: &scene,
+            paths: &[],
+            picks: &picks,
+            assets: &[],
+            object_count: 0,
+            selected: &[],
+            history: &[],
+            can_undo: false,
+            can_redo: false,
+            dirty: false,
+            conflict: false,
+            registry: &registry,
+            mode: crate::gizmo::Mode::Move,
+            snap: crate::gizmo::Snap::default(),
+            view_mode: loom_render::ablate::ViewMode::default(),
+            filter: "",
+            collapsed: &collapsed,
+            problems: &[],
+            scenes: &[],
+            open_scene: "",
+            agent_log: &[],
+            redo_history: &[],
+            selection_edges: &[],
+            rings: &[],
+            handles: &[],
+            dragging: None,
+            fps: 60.0,
+            cpu_ms: 1.0,
+            draw_ms: 2.0,
+            agent_marks: &[],
+            overrides: &overrides,
+            console: &[],
+            tick_seconds: 1.0 / 60.0,
+        };
+        assert!(!fields_editable(&state));
+        assert!(!structure_editable(&state));
+    }
+
     use super::hidden_by_collapse;
 
     /// **A fold hides descendants, not the node itself**, and not a sibling

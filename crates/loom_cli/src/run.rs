@@ -606,6 +606,8 @@ struct Drag {
     from_angle: f32,
     /// True when the press landed on a rotation ring rather than an axis line.
     ring: bool,
+    /// Which way that ring turns from where the camera was — ADR 0099.
+    sign: f32,
 }
 
 struct App {
@@ -1836,8 +1838,9 @@ impl ApplicationHandler for App {
                     .and_then(|path| self.subtree_bounds(&path));
                 let centre = focused_bounds.map(|(min, max)| (min + max) * 0.5);
                 self.handles = centre.map_or_else(Vec::new, |c| gizmo::handles(&projection, c));
-                // A ring the size of the thing it turns, so it reads as
-                // belonging to the object rather than floating at a fixed size.
+                // A ring at a constant size on screen — see `gizmo::rings`.
+                // Sizing it to the object put a circle bigger than the window
+                // across the whole viewport.
                 self.rings = match (centre, self.mode) {
                     (Some(c), Mode::Rotate) => gizmo::rings(&projection, c),
                     _ => Vec::new(),
@@ -2552,6 +2555,8 @@ impl App {
             UiAction::AddPrefabInstance(key) => self.add_prefab_instance(&key),
             UiAction::CreatePrimitive(shape) => self.create_primitive(&shape),
             UiAction::OpenScene(path) => self.open_scene(&path),
+            UiAction::NewScene => self.new_scene(),
+            UiAction::SaveAs(name) => self.save_as(&name),
             UiAction::Copy => self.copy_selection(),
             UiAction::Paste => self.paste_clipboard(),
             UiAction::Duplicate => self.duplicate_selection(),
@@ -3584,6 +3589,11 @@ impl App {
                 })
                 .collect();
             let centre = handle.origin;
+            // The world point the ring turns about — the same one the ring was
+            // drawn around.
+            let world_centre = self
+                .subtree_bounds(&node)
+                .map_or(Vec3::ZERO, |(min, max)| (min + max) * 0.5);
             self.drag = Some(Drag {
                 handle,
                 from: self.cursor,
@@ -3593,6 +3603,7 @@ impl App {
                 centre,
                 from_angle: gizmo::angle_about(centre, self.cursor),
                 ring: true,
+                sign: gizmo::ring_sign(&self.projection(), world_centre, axis),
             });
             return;
         }
@@ -3618,6 +3629,7 @@ impl App {
                 centre: self.handles[index].origin,
                 from_angle: 0.0,
                 ring: false,
+                sign: 1.0,
             });
             return;
         }
@@ -3689,11 +3701,14 @@ impl App {
                 // absolutely from the press and wraps at pi; that is the price
                 // of being drift-free across a dropped frame.
                 let degrees = if drag.ring {
+                    // Signed by which side of the plane the camera is on, or
+                    // the object counter-rotates from behind — see `ring_sign`.
                     gizmo::shortest_turn(
                         drag.from_angle,
                         gizmo::angle_about(drag.centre, self.cursor),
                     )
                     .to_degrees()
+                        * drag.sign
                 } else {
                     travelled * ROTATE_PER_UNIT
                 };
@@ -3766,6 +3781,15 @@ impl App {
 
     fn pick_at_cursor(&mut self) {
         if self.viewer.is_none() {
+            return;
+        }
+        // **Not while playing** — ADR 0099. `view.picks` holds the *authored*
+        // scene's boxes and the viewport is drawing the simulated world, so a
+        // click on the boat where it has sailed to selects whatever used to be
+        // there, or nothing. Selecting from the hierarchy still works, which is
+        // what tuning needs; a viewport pick that answers about a world nobody
+        // is looking at is worse than no pick.
+        if self.play.is_some() {
             return;
         }
         let projection = self.projection();
@@ -3925,6 +3949,92 @@ impl App {
         self.refresh_play_objects();
     }
 
+
+    /// A scene id derived from where the file is — ADR 0099.
+    ///
+    /// **Not random.** This project has no uuid dependency and does not want
+    /// one for a string, and `Math::random` is banned from the determinism
+    /// path anyway. A hash of the path formatted as a uuid is stable, unique
+    /// per file, and readable as what it is; two scenes cannot collide unless
+    /// they are the same file.
+    fn scene_id_for(path: &std::path::Path) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in path.to_string_lossy().as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        let a = hash;
+        let b = hash.rotate_left(17).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        format!(
+            "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
+            (a >> 32) as u32,
+            (a >> 16) as u16,
+            (a & 0x0fff) as u16,
+            (b >> 52) as u16 & 0x0fff,
+            b & 0xffff_ffff_ffff,
+        )
+    }
+
+    /// Start an empty scene beside this one — ADR 0099.
+    ///
+    /// **A real file, immediately.** An unsaved in-memory document would need a
+    /// second notion of "where does this live" everywhere the editor already
+    /// answers that with `scene_path`, and the first Save would need the dialog
+    /// this project does not have.
+    fn new_scene(&mut self) {
+        let mut path = self.base.join("untitled.loom");
+        let mut n = 1;
+        while path.exists() {
+            n += 1;
+            path = self.base.join(format!("untitled{n}.loom"));
+        }
+        // The smallest thing `Scene::parse` accepts and the viewer can show:
+        // one root node, and an id, because §3 wants one.
+        let scene = format!(
+            "# A new scene.\n[scene]\nformat = 1\nid = \"{}\"\n\n[[node]]\nname = \"Root\"\n",
+            Self::scene_id_for(&path),
+        );
+        if let Err(e) = std::fs::write(&path, scene) {
+            crate::log::error(format!("{}: {e}", path.display()));
+            return;
+        }
+        crate::log::info(format!("created {}", path.display()));
+        let path = path.to_string_lossy().into_owned();
+        self.open_scene(&path);
+    }
+
+    /// Write the scene under another name, beside this one — ADR 0099.
+    ///
+    /// The new file becomes the open one, which is what "save as" means
+    /// everywhere; a copy you are not editing is a different verb.
+    fn save_as(&mut self, name: &str) {
+        let name = if name.ends_with(".loom") {
+            name.to_owned()
+        } else {
+            format!("{name}.loom")
+        };
+        let path = self.base.join(&name);
+        if path.exists() {
+            crate::log::warn(format!("{} already exists; pick another name", path.display()));
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            crate::log::warn("this scene is open read-only".to_owned());
+            return;
+        };
+        if let Err(e) = std::fs::write(&path, session.text()) {
+            crate::log::error(format!("{}: {e}", path.display()));
+            return;
+        }
+        crate::log::info(format!("saved as {}", path.display()));
+        let path = path.to_string_lossy().into_owned();
+        // The copy on disk is what the session already held, so nothing is
+        // unsaved and `open_scene` will not refuse.
+        self.dirty = false;
+        self.open_scene(&path);
+    }
+
+
     /// Where a game saved from the editor lands — ADR 0098.
     ///
     /// **Beside the scene, named after it.** No file dialog: this project has
@@ -4011,6 +4121,12 @@ impl App {
             (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3),
             (2, 6), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7),
         ];
+        // Same reason the pick is disabled while playing: these boxes are the
+        // authored scene's, and drawing them over the simulated world puts them
+        // where things *were*.
+        if self.play.is_some() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for path in &self.selected {
             // The subtree's bounds, not the node's own — see `subtree_bounds`.
@@ -4045,8 +4161,11 @@ impl App {
     /// working on and what they expect to stay in frame. Failing that, a point
     /// a few metres ahead, so scrolling in open space still behaves.
     fn orbit_pivot(&self) -> Vec3 {
+        // While playing the authored bounds are stale, so the camera turns
+        // about a point ahead of it rather than about where a thing used to be.
         self.selected
             .first()
+            .filter(|_| self.play.is_none())
             .and_then(|path| self.subtree_bounds(path))
             .map_or_else(
                 || self.camera.position + self.camera.forward() * 8.0,
@@ -4437,6 +4556,41 @@ pub fn open_scene(
 
 #[cfg(test)]
 mod tests {
+
+    /// **A new scene has to parse.** It is written straight to disk and opened,
+    /// so a template with a malformed id or a missing field would create a file
+    /// the editor then refuses to load — and the human is left with an
+    /// untitled.loom they did not ask for and cannot open.
+    #[test]
+    fn a_new_scene_is_a_scene() {
+        let path = std::path::Path::new("/tmp/loom-new-scene-test/untitled.loom");
+        let id = super::App::scene_id_for(path);
+        let text = format!(
+            "# A new scene.\n[scene]\nformat = 1\nid = \"{id}\"\n\n[[node]]\nname = \"Root\"\n",
+        );
+        let scene = loom_scene::Scene::parse(&text).expect("the template must parse");
+        assert_eq!(scene.nodes().len(), 1);
+        assert_eq!(scene.scene_id().as_deref(), Some(id.as_str()));
+    }
+
+    /// The id is shaped like a uuid and is stable for a path — two scenes
+    /// cannot collide unless they are the same file.
+    #[test]
+    fn a_scene_id_is_uuid_shaped_and_stable() {
+        let a = super::App::scene_id_for(std::path::Path::new("/a/one.loom"));
+        let b = super::App::scene_id_for(std::path::Path::new("/a/two.loom"));
+        assert_ne!(a, b, "different files, different ids");
+        assert_eq!(a, super::App::scene_id_for(std::path::Path::new("/a/one.loom")));
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(parts.len(), 5, "{a}");
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "{a}"
+        );
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() || c == '-'), "{a}");
+    }
+
     /// **Orbit keeps the pivot where it is and the eye the same distance from
     /// it.** That is the whole contract; a version that drifted would slowly
     /// lose the thing you were circling, which is exactly the failure a fly
