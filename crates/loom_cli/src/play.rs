@@ -3558,6 +3558,26 @@ impl CameraSpring {
 }
 
 impl Play {
+    /// The running game as a save file — ADR 0088, reachable from the editor.
+    ///
+    /// **The same snapshot `loom sim --save` writes**, so a game saved from the
+    /// editor loads in the CLI and the other way round. Play mode is a real run
+    /// of the real runner; there is no second format for it.
+    #[must_use]
+    pub fn save_game(&self, tick: u64) -> serde_json::Value {
+        serde_json::json!({
+            "format": 1,
+            "tick": tick,
+            "state": self.runner.save_state(&self.world),
+        })
+    }
+
+    /// Put a saved game back into the running world — ADR 0088.
+    pub fn load_game(&mut self, value: &serde_json::Value) {
+        let state = value.get("state").unwrap_or(value);
+        self.runner.restore_state(&mut self.world, state);
+    }
+
     /// Begin simulating. `base` is the directory scripts resolve against —
     /// the scene file's own directory.
     ///

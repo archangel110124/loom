@@ -304,6 +304,7 @@ impl Dock {
         // The toolbar and the banner are chrome rather than tabs: they are
         // above the whole arrangement, in every editor, and a human cannot
         // close or move them.
+        panels::menu_bar(root, state, &mut actions);
         panels::toolbar(root, state, &mut actions);
         // After the toolbar and before the dock, so the strip is reserved out of
         // the same space the panels divide up.

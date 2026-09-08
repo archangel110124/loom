@@ -36,6 +36,12 @@ pub enum UiAction {
     /// Empty `field` reverts the whole instance.
     RevertOverride(String, String),
     SetMode(Mode),
+    /// Write the running game to a save file — ADR 0098. Play only.
+    SaveGame,
+    /// Read one back into the running game — ADR 0098. Play only.
+    LoadGame,
+    /// Give the selection a new name from the hierarchy, without the inspector.
+    BeginRename(String),
     /// Fold a node's children away — ADR 0098.
     ToggleCollapsed(String),
     /// Narrow the hierarchy to nodes matching this text — ADR 0093.
@@ -1079,6 +1085,145 @@ pub(crate) fn history(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut V
                     }
                 });
         }
+    });
+}
+
+/// The menu bar — ADR 0098.
+///
+/// **Every editor has one and this had none.** Without it there is nowhere to
+/// put a verb that is not worth a toolbar button, so verbs either crowd the
+/// toolbar until it overdraws itself — which is exactly what happened — or do
+/// not exist. It is also the first place a human looks to find out what a tool
+/// can do.
+pub(crate) fn menu_bar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    egui::Panel::top("menubar").show(root, |ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
+            let editing = state.editable && state.playing.is_none();
+
+            ui.menu_button("File", |ui| {
+                if ui
+                    .add_enabled(state.dirty, egui::Button::new("Save scene"))
+                    .clicked()
+                {
+                    actions.push(UiAction::Save);
+                    ui.close();
+                }
+                ui.separator();
+                ui.menu_button("Open scene", |ui| {
+                    if state.scenes.is_empty() {
+                        ui.weak("no other scenes beside this one");
+                    }
+                    for scene in state.scenes {
+                        let open = scene == state.open_scene;
+                        let name = scene.rsplit('/').next().unwrap_or(scene);
+                        if ui
+                            .add_enabled(!open && !state.dirty, egui::Button::new(name))
+                            .on_hover_text(scene)
+                            .clicked()
+                        {
+                            actions.push(UiAction::OpenScene(scene.clone()));
+                            ui.close();
+                        }
+                    }
+                });
+            });
+
+            ui.menu_button("Edit", |ui| {
+                if ui.add_enabled(state.can_undo, egui::Button::new("Undo")).clicked() {
+                    actions.push(UiAction::Undo);
+                    ui.close();
+                }
+                if ui.add_enabled(state.can_redo, egui::Button::new("Redo")).clicked() {
+                    actions.push(UiAction::Redo);
+                    ui.close();
+                }
+                ui.separator();
+                for (label, action) in [
+                    ("Copy", UiAction::Copy),
+                    ("Paste", UiAction::Paste),
+                    ("Duplicate", UiAction::Duplicate),
+                    ("Delete", UiAction::Delete),
+                ] {
+                    if ui.add_enabled(editing, egui::Button::new(label)).clicked() {
+                        actions.push(action);
+                        ui.close();
+                    }
+                }
+            });
+
+            ui.menu_button("Create", |ui| {
+                for shape in PRIMITIVES {
+                    if ui.add_enabled(editing, egui::Button::new(*shape)).clicked() {
+                        actions.push(UiAction::CreatePrimitive((*shape).to_owned()));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.add_enabled(editing, egui::Button::new("Empty child")).clicked()
+                    && let Some(path) = state.selected.first()
+                {
+                    actions.push(UiAction::AddChild(path.clone()));
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("View", |ui| {
+                for mode in loom_render::ablate::ViewMode::ALL {
+                    if ui
+                        .selectable_label(state.view_mode == mode, mode.label())
+                        .clicked()
+                    {
+                        actions.push(UiAction::SetViewMode(mode));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Frame selection").clicked() {
+                    actions.push(UiAction::Focus);
+                    ui.close();
+                }
+            });
+
+            // **The engine's own verbs, where a human can reach them.** Save and
+            // load are the ADR 0088 format — the same snapshot `loom sim --save`
+            // writes — so a game saved here opens in the CLI.
+            ui.menu_button("Play", |ui| {
+                let playing = state.playing.is_some();
+                if ui
+                    .add_enabled(!playing, egui::Button::new("Play"))
+                    .clicked()
+                {
+                    actions.push(UiAction::Play);
+                    ui.close();
+                }
+                for (label, action, enabled) in [
+                    ("Pause", UiAction::Pause, playing),
+                    ("Step one tick", UiAction::StepOnce, playing),
+                    ("Stop", UiAction::Stop, playing),
+                ] {
+                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                        actions.push(action);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(playing, egui::Button::new("Save game"))
+                    .on_hover_text("the running world, in the format loom sim --save writes")
+                    .clicked()
+                {
+                    actions.push(UiAction::SaveGame);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(playing, egui::Button::new("Load game"))
+                    .clicked()
+                {
+                    actions.push(UiAction::LoadGame);
+                    ui.close();
+                }
+            });
+        });
     });
 }
 

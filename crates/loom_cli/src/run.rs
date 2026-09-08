@@ -2494,6 +2494,9 @@ impl App {
             }
             UiAction::SetMode(mode) => self.mode = mode,
             UiAction::SetFilter(text) => self.hierarchy_filter = text,
+            UiAction::SaveGame => self.save_game(),
+            UiAction::LoadGame => self.load_game(),
+            UiAction::BeginRename(_) => {}
             UiAction::ToggleCollapsed(path) => {
                 if !self.collapsed.remove(&path) {
                     self.collapsed.insert(path);
@@ -3777,6 +3780,55 @@ impl App {
 
         problems.sort_by(|a, b| b.blocking.cmp(&a.blocking).then(a.node.cmp(&b.node)));
         self.problems = problems;
+    }
+
+
+    /// Where a game saved from the editor lands — ADR 0098.
+    ///
+    /// **Beside the scene, named after it.** No file dialog: this project has
+    /// no dependency that draws one, and inventing a path scheme a human cannot
+    /// guess would be worse than one they can read off the console line.
+    fn save_game_path(&self) -> std::path::PathBuf {
+        self.scene_path.with_extension("save.json")
+    }
+
+    /// Write the running game out — ADR 0098.
+    fn save_game(&mut self) {
+        let path = self.save_game_path();
+        let Some(play) = self.play.as_ref() else {
+            crate::log::warn("nothing is playing".to_owned());
+            return;
+        };
+        let save = play.save_game(u64::from(play.ticks));
+        match serde_json::to_string_pretty(&save)
+            .map_err(|e| e.to_string())
+            .and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string()))
+        {
+            Ok(()) => crate::log::info(format!("saved the game to {}", path.display())),
+            Err(e) => crate::log::error(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// Read one back into the running game — ADR 0098.
+    fn load_game(&mut self) {
+        let path = self.save_game_path();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) => {
+                crate::log::error(format!("{}: {e}", path.display()));
+                return;
+            }
+        };
+        let Ok(save) = serde_json::from_str::<serde_json::Value>(&text) else {
+            crate::log::error(format!("{} is not a save file", path.display()));
+            return;
+        };
+        let Some(play) = self.play.as_mut() else {
+            crate::log::warn("start playing before loading a game".to_owned());
+            return;
+        };
+        play.load_game(&save);
+        crate::log::info(format!("loaded the game from {}", path.display()));
     }
 
     /// What the camera dollies toward and orbits around — ADR 0098.
