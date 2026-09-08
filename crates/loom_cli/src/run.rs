@@ -4324,12 +4324,11 @@ impl App {
     /// the selection box, the orbit pivot — had nothing to work with for
     /// exactly the nodes a human clicks first. The gizmo simply did not appear.
     fn subtree_bounds(&self, path: &str) -> Option<(Vec3, Vec3)> {
-        let prefix = format!("{path}/");
         let mut min = [f32::MAX; 3];
         let mut max = [f32::MIN; 3];
         let mut found = false;
         for (candidate, bounds) in &self.view.picks {
-            if candidate != path && !candidate.starts_with(&prefix) {
+            if !crate::in_subtree(candidate, path) {
                 continue;
             }
             found = true;

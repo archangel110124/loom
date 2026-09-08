@@ -51,6 +51,10 @@ USAGE:
         it has one; --yaw/--pitch overrides it and orbits the bounds instead.
         --hold is `loom sim`'s, below: the frame is what the scene looks like
         after `--sim` ticks of somebody pressing those keys.
+        --focus <node> frames that node and everything under it instead of the
+        whole scene, so a render can show what was just edited rather than the
+        island it sits on. A node with no geometry of its own — a light, an
+        empty — is framed at its own position. Implies --yaw/--pitch framing.
 
     loom render <scene.loom> --frames <n> [--spin <deg>] [--step <ticks>]
                              [--dolly <m>]
@@ -79,6 +83,11 @@ USAGE:
         which is the question a hue acceptance test asks and the diff cannot
         answer: whether the water in a named band is turquoise or grey.
 
+    loom scene <scene.loom> --get <node>
+        What a node is set to: its transform and every component, as JSON, for
+        the node and everything under it. Reads the resolved scene, so a value
+        coming from a prefab shows up at the node that instances it.
+
     loom agent inbox <scene.loom>
         What the human has asked the agent for and nobody has answered yet, as
         JSON: id, text, and the nodes that were selected when they asked. The
@@ -88,6 +97,11 @@ USAGE:
         Answer one. The editor shows it in the conversation. Do the actual work
         with `loom scene --tx`; the editor is watching the file and will show
         the change within 250 ms.
+
+    loom agent ask <scene.loom> --text <...> [--about <node,node>]
+        The human's half, from a terminal instead of the editor's Agent panel.
+        Same file, same ids, so a request typed here and one typed in the editor
+        are indistinguishable to whoever answers. --about is what was selected.
 
     loom pack <assets-dir> <out.pack>
         Fold an asset tree into one file. A binary with `assets.pack` beside it
@@ -264,7 +278,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
             ("--out", true), ("--size", true), ("--sim", true), ("--yaw", true),
             ("--pitch", true), ("--frames", true), ("--spin", true), ("--step", true),
             ("--dolly", true), ("--viewport", true), ("--hold", true),
-            ("--dread", true), ("--view", true),
+            ("--dread", true), ("--view", true), ("--focus", true),
         ],
     ),
     (
@@ -284,7 +298,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
             ("--load", true),
         ],
     ),
-    ("scene", &[("--tx", true), ("--dry-run", false)]),
+    ("scene", &[("--tx", true), ("--dry-run", false), ("--get", true)]),
     ("place", &[("--op", true), ("--dry-run", false), ("--expect-version", true)]),
     ("measure", &[("--node", true), ("--shape", false)]),
     ("water", &[("--at", true), ("--sim", true), ("--hold", true)]),
@@ -299,7 +313,7 @@ const FLAGS: &[(&str, &[(&str, bool)])] = &[
             ("--size", true), ("--steps", true),
         ],
     ),
-    ("agent", &[("--id", true), ("--text", true)]),
+    ("agent", &[("--id", true), ("--text", true), ("--about", true)]),
     ("run", &[
         ("--edit", false), ("--frames", true), ("--play", false),
         ("--shot", true), ("--hold", true), ("--menu", false),
@@ -414,11 +428,16 @@ fn run(args: &[String]) -> (u8, String) {
         Some("agent") => match (args.get(1).map(String::as_str), args.get(2)) {
             (Some("inbox"), Some(scene)) => agent_inbox(scene),
             (Some("reply"), Some(scene)) => agent_reply(scene, args),
+            (Some("ask"), Some(scene)) => agent_ask(scene, args),
             _ => (2, USAGE.to_owned()),
         },
         Some("pack") => match (args.get(1), args.get(2)) {
             (Some(dir), Some(out)) => pack(dir, out, flag(args, "--from").as_deref()),
             _ => (2, USAGE.to_owned()),
+        },
+        Some("scene") if flag(args, "--get").is_some() => match args.get(1) {
+            Some(path) => scene_get(path, &flag(args, "--get").unwrap_or_default()),
+            None => (2, USAGE.to_owned()),
         },
         Some("scene") => match args.get(1) {
             Some(path) => scene_tx(path, args),
@@ -987,7 +1006,48 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
     // But `--yaw`/`--pitch` is how the agent looks at a scene from a second
     // angle (design doc §2.10, "one render is a lie"), and that has to keep
     // working on a scene that has a camera in it.
-    let orbiting = yaw.is_some() || pitch.is_some();
+    // **Framing on what was changed.** A whole-scene render answers "does the
+    // island still look right"; it cannot answer "did the thing I just added
+    // appear", because a lantern on a boat is four pixels of a coastline. That
+    // gap is how an agent edits, renders, measures a 0.01% change and reports
+    // success — the picture agreed with it, from too far away to disagree.
+    let focus = flag(args, "--focus");
+    let orbiting = yaw.is_some() || pitch.is_some() || focus.is_some();
+    let mut framing = node_bounds(&world, &library);
+    if let Some(node) = &focus {
+        framing.retain(|path, _| in_subtree(path, node));
+        if framing.is_empty() {
+            // A node with no geometry under it — a light, an empty, a rig — is
+            // still a place to look at. Its own position, with enough room
+            // around it to see what it is doing.
+            let here = world.entities().iter().find_map(|e| {
+                let path = world.path(*e)?;
+                in_subtree(path, node).then(|| world.global_transform(*e))?
+            });
+            let Some(global) = here else {
+                // **Not a silent whole-scene render.** Falling back would put a
+                // picture of the right scene in front of a wrong question, and
+                // exit 0 would say the framing was honoured.
+                return (
+                    2,
+                    json_line(&serde_json::json!({
+                        "error": "no_such_node", "value": node,
+                        "constraint": "a node path in this scene",
+                        "hint": "`loom scene <scene> --get <ancestor>` lists what is under it",
+                    })),
+                );
+            };
+            let m = Mat4::from_cols_array(&global.matrix);
+            let at = m.transform_point3(Vec3::ZERO).to_array();
+            framing.insert(
+                node.clone(),
+                loom_scene::place::Bounds {
+                    min: [at[0] - 2.0, at[1] - 2.0, at[2] - 2.0],
+                    max: [at[0] + 2.0, at[1] + 2.0, at[2] + 2.0],
+                },
+            );
+        }
+    }
     let camera = match world.active_camera().filter(|_| !orbiting) {
         Some(view) => Camera {
             eye: Vec3::from_array(view.eye),
@@ -997,11 +1057,7 @@ fn render(path: &str, args: &[String]) -> (u8, String) {
         // Framed from REAL mesh bounds. Assuming a unit cube was fine while
         // every mesh was one; a voxel volume spans tens of units and put the
         // camera inside the terrain.
-        None => frame_scene(
-            &node_bounds(&world, &library),
-            yaw.unwrap_or(35.0),
-            pitch.unwrap_or(28.0),
-        ),
+        None => frame_scene(&framing, yaw.unwrap_or(35.0), pitch.unwrap_or(28.0)),
     };
 
     // The clock the wind is sampled at. `--sim` advances it, so a still of a
@@ -6390,6 +6446,17 @@ pub(crate) fn scene_bounds(
     ((min + max) * 0.5, (max - min).length() * 0.5)
 }
 
+/// Is `path` the node `node`, or something under it?
+///
+/// **One definition of "under", because there are two callers and a boundary
+/// case.** The editor's selection box and `render --focus` both mean the same
+/// thing by a subtree, and both got it right by writing the same line twice —
+/// which is how `Rig/Boat` starts matching `Rig/BoatHouse` the day one of them
+/// is simplified to a bare `starts_with`.
+pub(crate) fn in_subtree(path: &str, node: &str) -> bool {
+    path == node || (path.len() > node.len() && path.starts_with(node) && path.as_bytes()[node.len()] == b'/')
+}
+
 /// World bounds per renderable node, from its mesh and its global transform.
 pub(crate) fn node_bounds(
     world: &World,
@@ -6634,6 +6701,41 @@ fn agent_inbox(scene: &str) -> (u8, String) {
     )
 }
 
+/// Ask for something — ADR 0100.
+///
+/// **The human's half without the editor.** The Agent panel writes these, which
+/// is the normal way; a headless box has no panel, and neither does a test that
+/// wants to drive the whole loop. Both write the same file, so nothing
+/// downstream can tell which end a request came from.
+fn agent_ask(scene: &str, args: &[String]) -> (u8, String) {
+    let Some(text) = flag(args, "--text").filter(|t| !t.trim().is_empty()) else {
+        return (
+            2,
+            json_line(&serde_json::json!({
+                "error": "missing_flag", "value": "--text",
+                "constraint": "what you are asking for",
+            })),
+        );
+    };
+    // Comma-separated, matching how the editor sends a multiple selection.
+    let about: Vec<String> = flag(args, "--about")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    match agent_link::ask(std::path::Path::new(scene), &text, &about) {
+        Ok(id) => (0, json_line(&serde_json::json!({ "asked": id, "about": about }))),
+        Err(e) => (
+            1,
+            json_line(&serde_json::json!({
+                "error": "io_error", "path": scene, "constraint": e.to_string(),
+            })),
+        ),
+    }
+}
+
 /// Answer one of them — ADR 0100.
 fn agent_reply(scene: &str, args: &[String]) -> (u8, String) {
     let Some(id) = flag(args, "--id").and_then(|v| v.parse::<u64>().ok()) else {
@@ -6655,6 +6757,102 @@ fn agent_reply(scene: &str, args: &[String]) -> (u8, String) {
             })),
         ),
     }
+}
+
+/// What a node is set to — ADR 0101.
+///
+/// **The agent's read path.** Everything an agent can *change* has had a verb
+/// since the beginning; finding out what a value currently *is* meant grepping
+/// the file, which works until a field is written in a prefab, or by a mood
+/// stage, or in a `[node.overrides]` table. Asking for a change without being
+/// able to read the starting point is half a conversation.
+///
+/// Reads the resolved scene, because that is what the game sees: a value coming
+/// from a prefab shows up here at the node that instances it.
+fn scene_get(path: &str, node: &str) -> (u8, String) {
+    let src = match loom_asset::pack::read_text(std::path::Path::new(path)) {
+        Ok(text) => text,
+        Err(e) => {
+            return (
+                2,
+                json_line(&serde_json::json!({
+                    "error": "io_error", "path": path, "constraint": e.to_string(),
+                })),
+            );
+        }
+    };
+    let scene = match Scene::parse(&src) {
+        Ok(scene) => scene,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+    let scene = match prefab_load::for_reading(&scene, std::path::Path::new(path)) {
+        Ok(scene) => scene,
+        Err(errors) => return (1, json_line(&serde_json::json!({ "errors": errors }))),
+    };
+
+    // A prefix matches the node and everything under it, so one call can answer
+    // "what is the boat like" rather than one field at a time.
+    let prefix = format!("{node}/");
+    let found: Vec<serde_json::Value> = scene
+        .nodes()
+        .iter()
+        .filter(|n| n.path == node || n.path.starts_with(&prefix))
+        .map(|n| {
+            serde_json::json!({
+                "node": n.path,
+                "transform": {
+                    "pos": n.transform.pos,
+                    "rot_euler": n.transform.rot_euler,
+                    "scale": n.transform.scale,
+                },
+                "components": n.components,
+            })
+        })
+        .collect();
+
+    if found.is_empty() {
+        // **A hint that is wrong is worse than no hint.** This used to say
+        // "`loom validate` lists every path the scene resolves to", and it does
+        // not — it prints a *count*. An agent that followed it got the number
+        // 260 and was no closer. So the error carries the answer instead: the
+        // paths whose last segment is the one that was asked for. `col_stem`
+        // under a boat is really `Rig/Boat/Decks/col_stem`, and being told so
+        // costs one line here and saves a search there.
+        let leaf = node.rsplit('/').next().unwrap_or(node);
+        let mut near: Vec<&str> = scene
+            .nodes()
+            .iter()
+            .map(|n| n.path.as_str())
+            .filter(|path| path.rsplit('/').next() == Some(leaf))
+            .collect();
+        near.truncate(8);
+        let hint = if near.is_empty() {
+            // Nothing with that name anywhere: say how far down the path held,
+            // which separates a typo in the leaf from a wrong branch entirely.
+            let mut deepest = String::new();
+            for (index, _) in node.match_indices('/') {
+                if scene.nodes().iter().any(|n| n.path == node[..index]) {
+                    deepest = node[..index].to_owned();
+                }
+            }
+            match deepest.as_str() {
+                "" => "nothing under that name; `--get` an ancestor to list what is there".to_owned(),
+                held => format!("`{held}` exists; nothing named `{leaf}` under it"),
+            }
+        } else {
+            format!("did you mean: {}", near.join(", "))
+        };
+        return (
+            1,
+            json_line(&serde_json::json!({
+                "error": "no_such_node",
+                "value": node,
+                "constraint": "a node path in this scene",
+                "hint": hint,
+            })),
+        );
+    }
+    (0, json_line(&serde_json::json!({ "nodes": found })))
 }
 
 #[cfg(test)]
@@ -8636,6 +8834,83 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["error"], "unknown_flag");
         assert_eq!(v["value"], "--frame");
+    }
+
+    /// **A sibling whose name starts with yours is not under you.** `Rig/Boat`
+    /// and `Rig/BoatHouse` are the case a bare `starts_with` gets wrong, and
+    /// both the selection box and `render --focus` would get it wrong together.
+    #[test]
+    fn a_subtree_stops_at_a_path_separator() {
+        assert!(super::in_subtree("Rig/Boat", "Rig/Boat"), "a node is its own subtree");
+        assert!(super::in_subtree("Rig/Boat/Decks/col_stem", "Rig/Boat"));
+        assert!(!super::in_subtree("Rig/BoatHouse", "Rig/Boat"), "a sibling is not a child");
+        assert!(!super::in_subtree("Rig/BoatHouse/Door", "Rig/Boat"));
+        assert!(!super::in_subtree("Rig", "Rig/Boat"), "a parent is not a child");
+    }
+
+    /// **A framing that cannot be honoured must not render anyway.** Falling
+    /// back to the whole scene would put a correct picture of the wrong thing
+    /// in front of the question, and exit 0 would report the framing as done —
+    /// the failure this whole flag exists to close.
+    #[test]
+    fn a_focus_on_a_node_that_is_not_there_is_refused() {
+        let (code, out) = run(&args(&[
+            "render",
+            "../../assets/test/office.loom",
+            "--out",
+            "/dev/null",
+            "--focus",
+            "Office/Nope",
+        ]));
+
+        assert_eq!(code, 2, "wrong invocation is exit 2: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["error"], "no_such_node");
+        assert_eq!(v["value"], "Office/Nope");
+    }
+
+    /// **The hint on a missed node must be true.** It used to say `loom
+    /// validate` lists every path; validate prints a *count*, so an agent that
+    /// followed the hint got a number and was no closer. The paths that do
+    /// exist under that name are the answer, and they are cheap to find.
+    #[test]
+    fn a_missed_node_is_told_where_that_name_really_lives() {
+        let (code, out) = run(&args(&[
+            "scene",
+            "../../assets/test/office.loom",
+            "--get",
+            "Office/DeskLamp",
+        ]));
+
+        assert_eq!(code, 1, "a node that does not resolve is exit 1: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["error"], "no_such_node");
+        let hint = v["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("Office/Desk/DeskLamp"),
+            "should name the real path, got: {hint}"
+        );
+        // The old hint, kept as a fault check: if this string ever comes back,
+        // somebody restored the advice that does not work.
+        assert!(!hint.contains("loom validate"), "the untrue hint is back");
+    }
+
+    /// A leaf that exists nowhere is a different mistake from a leaf under the
+    /// wrong parent, and saying which saves guessing at the other one.
+    #[test]
+    fn a_name_that_exists_nowhere_says_how_far_the_path_held() {
+        let (code, out) = run(&args(&[
+            "scene",
+            "../../assets/test/office.loom",
+            "--get",
+            "Office/Desk/Nonesuch",
+        ]));
+
+        assert_eq!(code, 1);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let hint = v["hint"].as_str().unwrap();
+        assert!(hint.contains("Office/Desk"), "should name the ancestor that held: {hint}");
+        assert!(hint.contains("Nonesuch"), "should name the segment that did not: {hint}");
     }
 
     /// A near-miss on a flag that *does* exist for another subcommand is the

@@ -1651,18 +1651,14 @@ fn image(bless: bool) -> std::process::ExitCode {
                 let mut argv: Vec<&str> =
                     vec!["render", scene, "--out", &rendered_path, "--size", GOLDEN_SIZE];
                 argv.extend_from_slice(extra);
-                let render = match run(&loom, &root, &argv) {
-                    Ok(output) => output,
-                    Err(e) => {
-                        failures.push(format!("render {name}: {e}"));
-                        return (1, failures, blessed);
-                    }
-                };
-                if !render.status.success() {
-                    failures.push(format!(
-                        "render {name}: {}",
-                        String::from_utf8_lossy(&render.stderr).trim()
-                    ));
+                let (bytes, retried, last) = render_with_retry(&loom, &root, &argv, &rendered);
+                if retried > 0 {
+                    // Printed, never swallowed: a retry rate that climbs is a
+                    // finding about the machine, not noise to be tidied away.
+                    eprintln!("  image: {name} rendered on the second attempt ({last})");
+                }
+                if bytes.is_none() {
+                    failures.push(format!("render {name}: {last}"));
                     return (1, failures, blessed);
                 }
 
@@ -2585,19 +2581,8 @@ fn repeat() -> std::process::ExitCode {
                     return (0, failures, String::new());
                 }
 
-                // **A dead render is retried once, loudly.** Parallelising this
-                // gate produced a spurious `DIFFER` in two runs of three — a
-                // render dying with empty stderr, which reads as the process
-                // being killed rather than failing. It did not reproduce in 44
-                // concurrent renders, so the cause is unknown and rare; what is
-                // known is that it arrived with the concurrency.
-                //
-                // A determinism gate is worth exactly as much as the trust that
-                // a failure means something, so the transient must not be able
-                // to report one. It is retried rather than tolerated, and the
-                // retry is **printed** — if this line starts appearing often,
-                // the rate has changed and that is a finding, not noise. Two
-                // failures in a row is still a failure.
+                // A dead render is retried once, loudly — see
+                // `render_with_retry`, which both this row and `image` use.
                 let mut renders: Vec<Option<Vec<u8>>> = Vec::new();
                 let mut retried = 0_u32;
                 for index in 0..RUNS {
@@ -2607,46 +2592,12 @@ fn repeat() -> std::process::ExitCode {
                         vec!["render", scene, "--out", &path_string, "--size", GOLDEN_SIZE];
                     argv.extend_from_slice(extra);
 
-                    // One attempt, then one retry, then it is a failure.
-                    let mut bytes = None;
-                    let mut last = String::new();
-                    for attempt in 0..2 {
-                        match run(&loom, &root, &argv) {
-                            Ok(output) if output.status.success() => {
-                                // **An unreadable output is a broken run, not a
-                                // differing one.** `.ok()` used to turn a failed
-                                // read into `None`, which then compared unequal
-                                // and printed `DIFFER` — a transient accusing
-                                // this gate of catching non-determinism it had
-                                // never seen.
-                                match std::fs::read(&path) {
-                                    Ok(read) => {
-                                        bytes = Some(read);
-                                        break;
-                                    }
-                                    Err(e) => last = format!("rendered but unreadable: {e}"),
-                                }
-                            }
-                            Ok(output) => {
-                                let stderr = String::from_utf8_lossy(&output.stderr);
-                                last = match stderr.trim() {
-                                    "" => format!("exited {} with no message", output.status),
-                                    message => message.to_owned(),
-                                };
-                            }
-                            Err(e) => last = e,
-                        }
-                        if attempt == 0 {
-                            retried += 1;
-                        }
+                    let (bytes, again, last) = render_with_retry(&loom, &root, &argv, &path);
+                    retried += again;
+                    if bytes.is_none() {
+                        failures.push(format!("render {name} (run {index}): {last}"));
                     }
-                    match bytes {
-                        Some(read) => renders.push(Some(read)),
-                        None => {
-                            failures.push(format!("render {name} (run {index}): {last}"));
-                            renders.push(None);
-                        }
-                    }
+                    renders.push(bytes);
                 }
 
                 let digests: Vec<String> = renders
@@ -2723,6 +2674,60 @@ fn run(loom: &Path, root: &Path, args: &[&str]) -> Result<Output, String> {
         .current_dir(root)
         .output()
         .map_err(|e| e.to_string())
+}
+
+/// **One render, retried once if it dies.** Parallelising the gate produced a
+/// render dying with *empty stderr* — the signature of a process being killed
+/// rather than failing. It did not reproduce in 44 concurrent renders, so the
+/// cause is unknown and rare; what is known is that it arrived with the
+/// concurrency.
+///
+/// `repeat` grew this retry first and `image` did not, so the same transient
+/// that `repeat` shrugs off failed the `image` row on 2026-09-08 with the
+/// message `render lanternhead: ` — a scene name, a colon, and nothing, which
+/// is what an empty stderr prints as. A gate is worth exactly as much as the
+/// trust that a failure means something. Both rows now come through here.
+///
+/// The retry is **counted, not hidden**: callers print it, so if this starts
+/// appearing often the rate has changed and that is a finding. Two failures in
+/// a row is still a failure.
+///
+/// Returns the rendered bytes, how many attempts were retried, and the last
+/// error if no attempt produced a readable image.
+fn render_with_retry(
+    loom: &Path,
+    root: &Path,
+    argv: &[&str],
+    out: &Path,
+) -> (Option<Vec<u8>>, u32, String) {
+    let mut retried = 0;
+    let mut last = String::new();
+    for attempt in 0..2 {
+        match run(loom, root, argv) {
+            Ok(output) if output.status.success() => {
+                // **An unreadable output is a broken run, not a differing one.**
+                // Turning a failed read into `None` made it compare unequal and
+                // print `DIFFER` — a transient accusing the determinism gate of
+                // catching non-determinism it had never seen.
+                match std::fs::read(out) {
+                    Ok(read) => return (Some(read), retried, last),
+                    Err(e) => last = format!("rendered but unreadable: {e}"),
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                last = match stderr.trim() {
+                    "" => format!("exited {} with no message", output.status),
+                    message => message.to_owned(),
+                };
+            }
+            Err(e) => last = e,
+        }
+        if attempt == 0 {
+            retried += 1;
+        }
+    }
+    (None, retried, last)
 }
 
 /// `loom`, with environment variables set.
@@ -3595,4 +3600,80 @@ fn human(bytes: u64) -> String {
         }
     }
     format!("{bytes:.0} B")
+}
+
+// A gate's retry is itself a thing that can be wrong, and it only runs on a
+// transient nobody can summon on demand. So the transient is faked: a stand-in
+// `loom` that dies the way the real one did — nonzero, empty stderr.
+#[cfg(all(test, unix))]
+mod tests {
+    use super::render_with_retry;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    // **These tests must not run at the same time.** One thread writing a
+    // script while another forks means the child inherits the open write fd,
+    // and the exec of that script fails ETXTBSY — "Text file busy", which is
+    // exactly the kind of spurious failure this whole change exists to stop.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    /// A stand-in `loom` that fails its first `attempts` runs and then works.
+    /// It counts runs in a file beside itself, so the count survives the exec.
+    fn fake_loom(name: &str, fail_first: u32) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("loom_xtask_retry_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("loom");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 n=$(cat '{count}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{count}'\n\
+                 [ \"$n\" -le {fail_first} ] && exit 1\n\
+                 while [ $# -gt 0 ]; do [ \"$1\" = --out ] && printf pixels > \"$2\"; shift; done\n\
+                 exit 0\n",
+                count = dir.join("count").display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (script, dir)
+    }
+
+    fn render(script: &Path, dir: &Path) -> (Option<Vec<u8>>, u32, String) {
+        let out = dir.join("out.png");
+        let out_string = out.to_string_lossy().into_owned();
+        let argv = ["render", "scene.loom", "--out", &out_string];
+        render_with_retry(script, dir, &argv, &out)
+    }
+
+    #[test]
+    fn a_render_that_dies_once_is_retried_and_succeeds() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let (script, dir) = fake_loom("once", 1);
+        let (bytes, retried, _) = render(&script, &dir);
+        assert_eq!(bytes.as_deref(), Some(&b"pixels"[..]), "the retry produced no image");
+        assert_eq!(retried, 1, "the retry was not counted, so nobody would see it");
+    }
+
+    #[test]
+    fn two_failures_in_a_row_are_still_a_failure() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let (script, dir) = fake_loom("twice", 2);
+        let (bytes, retried, last) = render(&script, &dir);
+        assert!(bytes.is_none(), "a render that never worked was reported as working");
+        assert_eq!(retried, 1, "only one retry, not an unbounded loop");
+        // The message the empty-stderr death used to print as nothing at all.
+        assert!(last.contains("no message"), "unhelpful failure text: {last}");
+    }
+
+    #[test]
+    fn a_render_that_works_first_time_is_not_retried() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let (script, dir) = fake_loom("clean", 0);
+        let (bytes, retried, _) = render(&script, &dir);
+        assert!(bytes.is_some());
+        assert_eq!(retried, 0, "a healthy render must not look like a flaky one");
+    }
 }

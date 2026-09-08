@@ -37,6 +37,16 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("describe_type", "loom describe"),
     ("render_preview", "loom render"),
     ("run_scene", "loom sim --assert"),
+    // **The read half.** Everything above changes something or renders it;
+    // finding out what a value currently *is* meant grepping the file, which
+    // works until a field comes from a prefab, a mood stage or an overrides
+    // table. Asking for a change without being able to read the starting point
+    // is half a conversation. ADR 0101.
+    ("scene_read", "loom scene --get"),
+    // **The human's half of the conversation** — ADR 0100. The editor writes
+    // what somebody typed into its Agent panel; these read it and answer.
+    ("agent_inbox", "loom agent inbox"),
+    ("agent_reply", "loom agent reply"),
 ];
 
 #[cfg(test)]
