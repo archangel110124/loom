@@ -305,6 +305,9 @@ impl Dock {
         // above the whole arrangement, in every editor, and a human cannot
         // close or move them.
         panels::toolbar(root, state, &mut actions);
+        // After the toolbar and before the dock, so the strip is reserved out of
+        // the same space the panels divide up.
+        panels::status_bar(root, state);
         if state.conflict {
             panels::conflict_banner(root, &mut actions);
         }
@@ -701,6 +704,7 @@ mod tests {
             let panels = PanelState {
                 snap: crate::gizmo::Snap::default(),
                 filter: "",
+                collapsed: &std::collections::BTreeSet::new(),
                 view_mode: loom_render::ablate::ViewMode::default(),
                 problems: &problems,
                 scenes: &scenes,
@@ -756,6 +760,7 @@ mod tests {
                 view_mode: loom_render::ablate::ViewMode::default(),
                 snap: crate::gizmo::Snap::default(),
                 filter,
+                collapsed: &std::collections::BTreeSet::new(),
                 problems: &[],
                 scenes: &[],
                 open_scene: "",
@@ -808,6 +813,7 @@ mod tests {
         let panels = PanelState {
             snap: crate::gizmo::Snap::default(),
             filter: "",
+            collapsed: &std::collections::BTreeSet::new(),
             view_mode: loom_render::ablate::ViewMode::default(),
             problems: &[],
             scenes: &[],

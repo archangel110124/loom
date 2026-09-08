@@ -36,6 +36,8 @@ pub enum UiAction {
     /// Empty `field` reverts the whole instance.
     RevertOverride(String, String),
     SetMode(Mode),
+    /// Fold a node's children away — ADR 0098.
+    ToggleCollapsed(String),
     /// Narrow the hierarchy to nodes matching this text — ADR 0093.
     SetFilter(String),
     /// Choose what the viewport draws — ADR 0097.
@@ -153,6 +155,8 @@ pub struct PanelState<'a> {
     pub snap: crate::gizmo::Snap,
     /// What the hierarchy is filtered to. Empty shows everything.
     pub filter: &'a str,
+    /// Nodes whose children are folded away — ADR 0098.
+    pub collapsed: &'a std::collections::BTreeSet<String>,
     /// What the viewport is drawing — ADR 0097.
     pub view_mode: loom_render::ablate::ViewMode,
     /// What is wrong with the scene, recomputed when it changes — ADR 0093.
@@ -250,7 +254,12 @@ fn summarise(value: &serde_json::Value) -> String {
 
 pub(crate) fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
     egui::Panel::top("toolbar").show(root, |ui| {
-        ui.horizontal(|ui| {
+        // **Wrapped, not clipped.** A fixed row overdraws itself the moment the
+        // tools outgrow the window: at 1440 px the Undo/Redo/Save group was
+        // rendering on top of the stats as "R143 fpsSavepu 1.6". A professional
+        // tool does not draw over its own chrome, so the row reflows and the
+        // stats moved to a status bar of their own.
+        ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("loom").strong());
             ui.separator();
 
@@ -416,21 +425,7 @@ pub(crate) fn toolbar(root: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
                 );
             }
 
-            // Right-aligned stats, the way Unity's are.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{:.0} fps · cpu {:.1} · draw {:.1} ms · {} nodes · {} draws",
-                        state.fps,
-                        state.cpu_ms,
-                        state.draw_ms,
-                        state.paths.len(),
-                        state.object_count
-                    ))
-                    .weak()
-                    .monospace(),
-                );
-            });
+
         });
     });
 }
@@ -449,8 +444,24 @@ fn add_component_menu(
 ) {
     ui.add_enabled_ui(editing, |ui| {
         ui.menu_button("Add Component", |ui| {
+            // **Forty types is past the point of scanning a list.** egui keeps
+            // this across frames while the menu is open, which is exactly its
+            // lifetime — the box is not state anyone else needs.
+            let id = ui.id().with("add_filter");
+            let mut needle: String = ui.data(|d| d.get_temp(id).unwrap_or_default());
+            if ui
+                .add(egui::TextEdit::singleline(&mut needle).hint_text("search…"))
+                .changed()
+            {
+                ui.data_mut(|d| d.insert_temp(id, needle.clone()));
+            }
+            let needle = needle.to_lowercase();
+
             let mut offered = 0;
             for type_name in state.registry.type_names() {
+                if !needle.is_empty() && !type_name.to_lowercase().contains(&needle) {
+                    continue;
+                }
                 // `Name` and `Transform` are node-key sugar (format §3), not
                 // components anyone adds by hand.
                 if matches!(type_name, "Name" | "Transform")
@@ -562,6 +573,24 @@ pub(crate) fn conflict_banner(root: &mut egui::Ui, actions: &mut Vec<UiAction>) 
 /// **Case-insensitive, over the whole path**, so `boat/helm` finds the helm and
 /// `helm` finds it too. Matching only the leaf name would make a filter useless
 /// on a scene whose interesting nodes are called `Body` eleven times.
+/// Whether an ancestor of `path` is folded shut — ADR 0098.
+///
+/// **Checked by prefix, not by walking a tree**, because the hierarchy is a
+/// flat list of slash-separated paths and building a tree to answer one
+/// question per row would be the only tree in the editor.
+#[must_use]
+pub fn hidden_by_collapse(path: &str, collapsed: &std::collections::BTreeSet<String>) -> bool {
+    let mut at = 0;
+    while let Some(slash) = path[at..].find('/') {
+        at += slash;
+        if collapsed.contains(&path[..at]) {
+            return true;
+        }
+        at += 1;
+    }
+    false
+}
+
 #[must_use]
 pub fn matches_filter(path: &str, filter: &str) -> bool {
     if filter.is_empty() {
@@ -597,7 +626,14 @@ pub(crate) fn hierarchy(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
     }
     ui.separator();
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for path in state.paths.iter().filter(|p| matches_filter(p, state.filter)) {
+        // **A filter overrides the folds.** Searching for a node buried under a
+        // shut parent must find it, or the filter is only a filter of what you
+        // had already opened.
+        let searching = !state.filter.is_empty();
+        for path in state.paths.iter().filter(|p| {
+            matches_filter(p, state.filter)
+                && (searching || !hidden_by_collapse(p, state.collapsed))
+        }) {
             // Indent by depth, so the hierarchy reads as a tree rather
             // than a flat list of slash-separated strings.
             let depth = path.matches('/').count();
@@ -606,6 +642,24 @@ pub(crate) fn hierarchy(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
             ui.horizontal(|ui| {
                 #[allow(clippy::cast_precision_loss)]
                 ui.add_space(depth as f32 * 14.0);
+                // The fold triangle, or a gap where one would be, so names
+                // stay in one column whether or not a node has children.
+                let prefix = format!("{path}/");
+                let has_children = state.paths.iter().any(|p| p.starts_with(&prefix));
+                if has_children && !searching {
+                    let shut = state.collapsed.contains(path);
+                    // **ASCII, because the shipped font has no triangles.**
+                    // U+25B8/U+25BE rendered as missing-glyph boxes, which is a
+                    // worse control than no control.
+                    if ui
+                        .add(egui::Button::new(if shut { "+" } else { "-" }).frame(false))
+                        .clicked()
+                    {
+                        actions.push(UiAction::ToggleCollapsed(path.clone()));
+                    }
+                } else {
+                    ui.add_space(14.0);
+                }
                 // Nodes that draw nothing are still real; showing which
                 // do saves opening the inspector to find out.
                 let marker = if state.picks.contains_key(path) {
@@ -1025,6 +1079,36 @@ pub(crate) fn history(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut V
                     }
                 });
         }
+    });
+}
+
+/// One line along the bottom: what the scene costs and what is selected.
+///
+/// **Its own strip, not the toolbar's tail.** Sharing a row with the tools
+/// meant the two fought for width and the loser was drawn over.
+pub(crate) fn status_bar(root: &mut egui::Ui, state: &PanelState<'_>) {
+    egui::Panel::bottom("status").show(root, |ui| {
+        ui.horizontal(|ui| {
+            match state.selected {
+                [] => ui.weak("nothing selected"),
+                [one] => ui.weak(one.as_str()),
+                many => ui.weak(format!("{} selected", many.len())),
+            };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{:.0} fps · cpu {:.1} · draw {:.1} ms · {} nodes · {} draws",
+                        state.fps,
+                        state.cpu_ms,
+                        state.draw_ms,
+                        state.paths.len(),
+                        state.object_count
+                    ))
+                    .weak()
+                    .monospace(),
+                );
+            });
+        });
     });
 }
 
@@ -1690,6 +1774,102 @@ fn draw_field(
 ///
 /// Every mutation is a `SpliceArray`, so the entries the human did not touch
 /// keep their comments and their `[[header]]` spelling on disk.
+/// Edit the fields of one object inside an array — ADR 0098.
+///
+/// **Returns the changed object rather than pushing an action**, because the
+/// caller has to put it back with a `Splice`: the op that edits an array
+/// element replaces the whole element, and that is deliberate — it keeps the
+/// human's formatting and comments in the file around it (see `SpliceArray`).
+///
+/// Typed off the JSON, not the schema. A number gets a drag box, a bool a
+/// checkbox, a short array of numbers a row of boxes — which covers waves,
+/// pontoons, voxel ops and mood stages. A nested object stays a summary; one
+/// level of recursion is where this stops being an inspector and starts being
+/// a JSON editor.
+fn object_fields(
+    ui: &mut egui::Ui,
+    item: &serde_json::Value,
+    editable: bool,
+) -> Option<serde_json::Value> {
+    let object = item.as_object()?;
+    let mut edited = object.clone();
+    let mut changed = false;
+
+    egui::Grid::new("entry").num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {
+        for (key, value) in object {
+            ui.label(egui::RichText::new(key).monospace().small());
+            match value {
+                serde_json::Value::Bool(b) => {
+                    let mut on = *b;
+                    if ui.add_enabled(editable, egui::Checkbox::new(&mut on, "")).changed() {
+                        edited.insert(key.clone(), serde_json::Value::Bool(on));
+                        changed = true;
+                    }
+                }
+                serde_json::Value::Number(n) => {
+                    let mut v = n.as_f64().unwrap_or_default();
+                    if ui
+                        .add_enabled(editable, egui::DragValue::new(&mut v).speed(0.01))
+                        .changed()
+                        && let Some(number) = serde_json::Number::from_f64(v)
+                    {
+                        edited.insert(key.clone(), serde_json::Value::Number(number));
+                        changed = true;
+                    }
+                }
+                serde_json::Value::String(text) => {
+                    let mut buffer = text.clone();
+                    if ui
+                        .add_enabled(editable, egui::TextEdit::singleline(&mut buffer))
+                        .changed()
+                    {
+                        edited.insert(key.clone(), serde_json::Value::String(buffer));
+                        changed = true;
+                    }
+                }
+                serde_json::Value::Array(items)
+                    if items.len() <= 4 && items.iter().all(serde_json::Value::is_number) =>
+                {
+                    let mut numbers: Vec<f64> =
+                        items.iter().filter_map(serde_json::Value::as_f64).collect();
+                    let mut row = false;
+                    ui.horizontal(|ui| {
+                        for slot in &mut numbers {
+                            row |= ui
+                                .add_enabled(
+                                    editable,
+                                    egui::DragValue::new(slot).speed(0.01).max_decimals(4),
+                                )
+                                .changed();
+                        }
+                    });
+                    if row {
+                        edited.insert(
+                            key.clone(),
+                            serde_json::Value::Array(
+                                numbers
+                                    .into_iter()
+                                    .filter_map(serde_json::Number::from_f64)
+                                    .map(serde_json::Value::Number)
+                                    .collect(),
+                            ),
+                        );
+                        changed = true;
+                    }
+                }
+                other => {
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(summarise(other)).weak().small(),
+                    ));
+                }
+            }
+            ui.end_row();
+        }
+    });
+
+    changed.then_some(serde_json::Value::Object(edited))
+}
+
 fn array_of_objects(
     ui: &mut egui::Ui,
     path: &str,
@@ -1723,9 +1903,50 @@ fn array_of_objects(
                     ));
                 }
             });
-            ui.add(
-                egui::Label::new(egui::RichText::new(summarise(item)).weak().small()).wrap(),
-            );
+            // **Collapsed by default.** `Environment.stages` has three entries
+            // of a dozen fields; opening all of them at once buries the rest of
+            // the inspector.
+            egui::CollapsingHeader::new(egui::RichText::new("fields").weak().small())
+                .id_salt((path, key, index))
+                .show(ui, |ui| {
+                    if let Some(updated) = object_fields(ui, item, editable) {
+                        // One element, replaced in place — the array around it
+                        // keeps its comments and its order.
+                        actions.push(UiAction::Splice(
+                            path.to_owned(),
+                            key.to_owned(),
+                            index,
+                            1,
+                            vec![updated],
+                        ));
+                    }
+                });
+        }
+        // **Reorder rewrites the whole array in one op**, because moving an
+        // entry by removing and re-inserting is two splices whose indices shift
+        // under each other — and two undo steps for one gesture.
+        if editable && items.len() > 1 {
+            ui.horizontal(|ui| {
+                ui.weak("move");
+                for index in 0..items.len() {
+                    if ui
+                        .small_button(format!("{index} up"))
+                        .on_hover_text("swap with the entry above")
+                        .clicked()
+                        && index > 0
+                    {
+                        let mut reordered = items.to_vec();
+                        reordered.swap(index, index - 1);
+                        actions.push(UiAction::Splice(
+                            path.to_owned(),
+                            key.to_owned(),
+                            0,
+                            items.len(),
+                            reordered,
+                        ));
+                    }
+                }
+            });
         }
         if editable && ui.small_button("+ add").clicked() {
             // A new entry at the schema's defaults, which for an untyped
@@ -1800,6 +2021,28 @@ impl egui::Widget for ColourButton<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::hidden_by_collapse;
+
+    /// **A fold hides descendants, not the node itself**, and not a sibling
+    /// whose name merely starts the same way — `Rig/Boat` must not fold
+    /// `Rig/BoatHouse`.
+    #[test]
+    fn a_collapsed_parent_hides_only_its_own_subtree() {
+        let shut = std::collections::BTreeSet::from(["Rig/Boat".to_owned()]);
+        assert!(!hidden_by_collapse("Rig", &shut));
+        assert!(!hidden_by_collapse("Rig/Boat", &shut), "the folded node stays visible");
+        assert!(hidden_by_collapse("Rig/Boat/Helm", &shut));
+        assert!(hidden_by_collapse("Rig/Boat/Deck/Rail", &shut), "at any depth");
+        assert!(!hidden_by_collapse("Rig/BoatHouse", &shut), "not a name prefix");
+        assert!(!hidden_by_collapse("Rig/Player", &shut));
+    }
+
+    #[test]
+    fn nothing_is_hidden_when_nothing_is_folded() {
+        let none = std::collections::BTreeSet::new();
+        assert!(!hidden_by_collapse("A/B/C", &none));
+    }
+
     use super::matches_filter;
 
     /// The filter reads the whole path, not the leaf. A scene with eleven

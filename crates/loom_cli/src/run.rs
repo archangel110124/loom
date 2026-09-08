@@ -116,6 +116,44 @@ impl FlyCamera {
         self.forward().cross(Vec3::Y).normalize_or_zero()
     }
 
+    /// Move along the view direction — ADR 0098.
+    ///
+    /// **Scaled by how far the pivot is**, so one notch crosses a sensible
+    /// fraction of what you are looking at whether that is a doorknob or a
+    /// harbour. A fixed step is unusable at both ends.
+    fn dolly(&mut self, notches: f32, pivot_distance: f32) {
+        let step = (pivot_distance * 0.12).clamp(0.05, 40.0);
+        self.position += self.forward() * notches * step;
+    }
+
+    /// Slide the eye across the view plane, the way a middle-drag does
+    /// everywhere else — ADR 0098.
+    fn pan(&mut self, dx: f32, dy: f32, pivot_distance: f32) {
+        // Pixels to metres at the pivot's depth, so the point under the cursor
+        // keeps up with it rather than sliding away.
+        let scale = (pivot_distance * 0.0022).clamp(0.002, 0.5);
+        let up = self.right().cross(self.forward()).normalize_or_zero();
+        self.position += self.right() * -dx * scale + up * dy * scale;
+    }
+
+    /// Turn around a point instead of on the spot — ADR 0098.
+    ///
+    /// **The one navigation verb a fly camera cannot fake.** Looking at a thing
+    /// from another side means orbiting it; without this the only way round an
+    /// object is to fly past and turn back, and you lose it off-screen doing so.
+    fn orbit(&mut self, pivot: Vec3, dyaw: f32, dpitch: f32) {
+        let offset = self.position - pivot;
+        let radius = offset.length();
+        if radius < 1e-4 {
+            return;
+        }
+        self.yaw += dyaw;
+        self.pitch = (self.pitch + dpitch).clamp(-1.53, 1.53);
+        // Back out along the new facing: the eye stays the same distance from
+        // the pivot and keeps looking at it.
+        self.position = pivot - self.forward() * radius;
+    }
+
     fn camera(&self) -> Camera {
         Camera {
             eye: self.position,
@@ -541,6 +579,15 @@ struct Drag {
     /// dropped frame cannot make the node drift.
     start: [[f32; 3]; 3],
     node: String,
+    /// Every node this drag moves, with the transform each had when it began —
+    /// ADR 0098.
+    ///
+    /// **A multi-selection used to move one node.** The gizmo captured only the
+    /// focused path, so selecting six crates and dragging moved the one you
+    /// happened to click last. Each node carries its own start for the same
+    /// reason `start` exists: absolute from the beginning, so a dropped frame
+    /// costs nothing.
+    group: Vec<(String, [[f32; 3]; 3])>,
 }
 
 struct App {
@@ -626,6 +673,8 @@ struct App {
     /// What the hierarchy is filtered to — ADR 0093. UI state, so it lives
     /// here rather than in the scene.
     hierarchy_filter: String,
+    /// Nodes whose children are folded away — ADR 0098.
+    collapsed: std::collections::BTreeSet<String>,
     /// What is wrong with the scene, recomputed on change — ADR 0093.
     problems: Vec<loom_editor::Problem>,
     /// Every edit from outside this window, newest last — ADR 0093.
@@ -880,6 +929,7 @@ impl App {
             snap: gizmo::Snap::default(),
             view_mode: loom_render::ablate::ViewMode::default(),
             hierarchy_filter: String::new(),
+            collapsed: std::collections::BTreeSet::new(),
             clipboard: Vec::new(),
             scenes: Vec::new(),
             problems: Vec::new(),
@@ -1506,7 +1556,25 @@ impl ApplicationHandler for App {
                 // the redraw.
             }
 
+            // **Scroll dollies** — ADR 0098. The single most-used input in any
+            // 3D tool, and there was no handler for it at all.
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.ui.as_ref().is_some_and(Ui::wants_pointer) {
+                    return;
+                }
+                let notches = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    // A touchpad reports pixels; 40 of them is about a notch.
+                    #[allow(clippy::cast_possible_truncation)]
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                let pivot = self.orbit_pivot();
+                let distance = (self.camera.position - pivot).length();
+                self.camera.dolly(notches, distance);
+            }
+
             WindowEvent::CursorMoved { position, .. } => {
+                let was = self.cursor;
                 #[allow(clippy::cast_possible_truncation)]
                 {
                     self.cursor = (position.x as f32, position.y as f32);
@@ -1528,6 +1596,23 @@ impl ApplicationHandler for App {
                 // gesture key means a drag is one undo step — but that
                 // collapses the undo history, not the work.
                 self.drag_dirty = true;
+
+                // **Middle-drag pans, Alt+left-drag orbits** — ADR 0098. Both
+                // read the delta here rather than per frame, because a camera
+                // move costs nothing to apply and should feel immediate.
+                let delta = (self.cursor.0 - was.0, self.cursor.1 - was.1);
+                let over_panel = self.ui.as_ref().is_some_and(Ui::wants_pointer);
+                if !over_panel {
+                    let pivot = self.orbit_pivot();
+                    let distance = (self.camera.position - pivot).length();
+                    if self.input.held("MouseMiddle") {
+                        self.camera.pan(delta.0, delta.1, distance);
+                    } else if self.input.held("MouseLeft")
+                        && (self.input.held("AltLeft") || self.input.held("AltRight"))
+                    {
+                        self.camera.orbit(pivot, delta.0 * -0.006, delta.1 * -0.006);
+                    }
+                }
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
@@ -1863,6 +1948,7 @@ impl ApplicationHandler for App {
                         .as_ref()
                         .map_or(&[][..], loom_scene::edit::Session::redo_labels),
                     filter: &self.hierarchy_filter,
+                    collapsed: &self.collapsed,
                     agent_marks: &marks,
                     console: &console,
                     overrides: &overrides,
@@ -2408,6 +2494,11 @@ impl App {
             }
             UiAction::SetMode(mode) => self.mode = mode,
             UiAction::SetFilter(text) => self.hierarchy_filter = text,
+            UiAction::ToggleCollapsed(path) => {
+                if !self.collapsed.remove(&path) {
+                    self.collapsed.insert(path);
+                }
+            }
             UiAction::SetViewMode(mode) => {
                 self.view_mode = mode;
                 if let Some(viewer) = self.viewer.as_mut() {
@@ -3445,11 +3536,20 @@ impl App {
             let Some(transform) = self.view.transform_of(&node) else {
                 return;
             };
+            let group = self
+                .selected
+                .iter()
+                .filter_map(|path| {
+                    let t = self.view.transform_of(path)?;
+                    Some((path.clone(), [t.pos, t.rot_euler, t.scale]))
+                })
+                .collect();
             self.drag = Some(Drag {
                 handle: self.handles[index].clone(),
                 from: self.cursor,
                 start: [transform.pos, transform.rot_euler, transform.scale],
                 node,
+                group,
             });
             return;
         }
@@ -3471,13 +3571,24 @@ impl App {
         }
 
         let (axis, node) = (drag.handle.axis, drag.node.clone());
-        let (start_pos, start_rot, start_scale) = (drag.start[0], drag.start[1], drag.start[2]);
+        // **Every selected node moves, each from its own start** — ADR 0098.
+        // The group falls back to the focused node alone, which is what a
+        // single selection is.
+        let group = if drag.group.is_empty() {
+            vec![(drag.node.clone(), drag.start)]
+        } else {
+            drag.group.clone()
+        };
         // Ctrl inverts the toggle rather than setting it, so somebody working
         // on the grid can step off it for one drag — see `gizmo::Snap`.
         let inverted = self.input.held("ControlLeft") || self.input.held("ControlRight");
         let step = self.snap.step(self.mode, inverted);
         let round = |value: f32| step.map_or(value, |step| gizmo::snap(value, step));
 
+        let mut ops = Vec::with_capacity(group.len());
+        for (node, start) in &group {
+        let node = node.clone();
+        let (start_pos, start_rot, start_scale) = (start[0], start[1], start[2]);
         let (label, op) = match self.mode {
             Mode::Move => {
                 // The handle points along a **world** axis; the node stores a
@@ -3520,8 +3631,19 @@ impl App {
                 )
             }
         };
+        let _ = label;
+        ops.push(op);
+        }
+
+        // **One gesture, one transaction, one undo step** — whether it moved
+        // one node or sixty. The gesture key is the focused node's, so a drag
+        // coalesces with itself and not with the next one.
+        let what = match group.len() {
+            1 => format!("{} {}", self.mode.label(), group[0].0),
+            n => format!("{} {n} nodes", self.mode.label()),
+        };
         let gesture = format!("gizmo:{node}:{axis}:{}", self.gesture_epoch);
-        self.transact_as(label, vec![op], Some(&gesture));
+        self.transact_as(what, ops, Some(&gesture));
     }
 
     /// Select whatever the cursor is over.
@@ -3655,6 +3777,24 @@ impl App {
 
         problems.sort_by(|a, b| b.blocking.cmp(&a.blocking).then(a.node.cmp(&b.node)));
         self.problems = problems;
+    }
+
+    /// What the camera dollies toward and orbits around — ADR 0098.
+    ///
+    /// **The selection when there is one**, because that is what a human is
+    /// working on and what they expect to stay in frame. Failing that, a point
+    /// a few metres ahead, so scrolling in open space still behaves.
+    fn orbit_pivot(&self) -> Vec3 {
+        self.selected
+            .first()
+            .and_then(|path| self.view.node_bounds(path))
+            .map_or_else(
+                || self.camera.position + self.camera.forward() * 8.0,
+                |bounds| {
+                    let (min, max) = (Vec3::from_array(bounds.min), Vec3::from_array(bounds.max));
+                    (min + max) * 0.5
+                },
+            )
     }
 
     /// Editing actions bound to keys.
@@ -4025,6 +4165,95 @@ pub fn open_scene(
 
 #[cfg(test)]
 mod tests {
+    /// **Orbit keeps the pivot where it is and the eye the same distance from
+    /// it.** That is the whole contract; a version that drifted would slowly
+    /// lose the thing you were circling, which is exactly the failure a fly
+    /// camera already has.
+    #[test]
+    fn orbiting_holds_the_pivot_and_the_radius() {
+        let pivot = super::Vec3::new(3.0, 1.0, -2.0);
+        let mut camera = super::FlyCamera {
+            position: pivot + super::Vec3::new(0.0, 0.0, 10.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 60.0,
+        };
+        let before = (camera.position - pivot).length();
+        for _ in 0..24 {
+            camera.orbit(pivot, 0.25, 0.05);
+        }
+        let after = (camera.position - pivot).length();
+        assert!((after - before).abs() < 1e-3, "radius drifted: {before} -> {after}");
+        // And it is still looking at the thing it is going round.
+        let to_pivot = (pivot - camera.position).normalize();
+        assert!(
+            camera.forward().dot(to_pivot) > 0.999,
+            "the camera stopped facing the pivot"
+        );
+    }
+
+    /// Pitch is clamped, or orbiting past vertical flips the world over.
+    #[test]
+    fn orbiting_cannot_go_over_the_pole() {
+        let pivot = super::Vec3::ZERO;
+        let mut camera = super::FlyCamera {
+            position: super::Vec3::new(0.0, 0.0, 5.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 60.0,
+        };
+        for _ in 0..200 {
+            camera.orbit(pivot, 0.0, 0.1);
+        }
+        assert!(camera.pitch <= 1.53, "pitch ran past the pole: {}", camera.pitch);
+        assert!(camera.position.is_finite(), "{:?}", camera.position);
+    }
+
+    /// **A notch has to mean something at both ends.** Scrolling toward a
+    /// doorknob and toward a harbour are the same gesture, so the step scales
+    /// with how far away the pivot is.
+    #[test]
+    fn a_dolly_notch_scales_with_distance() {
+        let make = || super::FlyCamera {
+            position: super::Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 60.0,
+        };
+        let (mut near, mut far) = (make(), make());
+        near.dolly(1.0, 2.0);
+        far.dolly(1.0, 200.0);
+        assert!(
+            far.position.length() > near.position.length() * 5.0,
+            "near {} vs far {}",
+            near.position.length(),
+            far.position.length()
+        );
+        // And it is bounded, so a pivot a kilometre off does not teleport you.
+        let mut absurd = make();
+        absurd.dolly(1.0, 100_000.0);
+        assert!(absurd.position.length() <= 40.0, "{}", absurd.position.length());
+    }
+
+    /// Panning moves across the view, never along it.
+    #[test]
+    fn panning_stays_in_the_view_plane() {
+        let mut camera = super::FlyCamera {
+            position: super::Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.3,
+            fov_y_degrees: 60.0,
+        };
+        let forward = camera.forward();
+        camera.pan(40.0, 25.0, 10.0);
+        let moved = camera.position;
+        assert!(moved.length() > 0.0, "pan did nothing");
+        assert!(
+            moved.normalize().dot(forward).abs() < 1e-3,
+            "pan drifted along the view direction"
+        );
+    }
+
     use super::{
         CODE_ALPHABET, CODE_DENY, CODE_SYMBOLS, Escape, egui, encode, escape_means, format_code,
         front_end_wanted, generate_code, normalise, room_code_panel, title_answers, wholesome,
