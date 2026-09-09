@@ -600,6 +600,37 @@ fn describe_all() -> (u8, String) {
     )
 }
 
+/// Everything `loom validate` refuses that `Scene::parse` does not see.
+///
+/// **The two validators are made to agree here, and nowhere else can.** The op
+/// layer's own post-apply check is `Scene::parse`, which cannot look inside a
+/// `VoxelVolume`'s free-form op list (its vocabulary lives in `loom_voxel`,
+/// which `loom_scene` may not depend on), cannot resolve an asset alias against
+/// the filesystem, and does not run the physics sanity pass. So a transaction
+/// could apply cleanly and leave a scene `loom validate` rejects — and because
+/// the renderer degrades rather than crashing (design doc §2.6), the result was
+/// a level whose terrain or mesh quietly vanished with every command reporting
+/// success.
+///
+/// `loom_cli` sees both sides of that boundary. This is the whole of the
+/// difference, in one place, so a caller cannot pick up half of it.
+fn post_apply_errors(scene: &loom_scene::Scene, base: &std::path::Path) -> Vec<serde_json::Value> {
+    let mut errors = voxel_op_errors(scene);
+    // An alias nothing declares is a typo in the scene — the agent's own text.
+    // A declared alias whose file is missing is a warning and stays one.
+    let (unresolved, _missing) = alias_report(scene, base);
+    errors.extend(unresolved);
+    // Physical findings are warnings by design; only the blocking ones belong
+    // in a refusal, and they are the ones `validate` reports `ok: false` for.
+    errors.extend(
+        loom_physics::check_scene(scene)
+            .into_iter()
+            .filter(|f| f.severity == loom_physics::Severity::Error)
+            .filter_map(|f| serde_json::to_value(f).ok()),
+    );
+    errors
+}
+
 /// The op list, schema-checked — the one check `Scene::parse` cannot do.
 ///
 /// **Extracted because it is not only `validate`'s.** A `VoxelVolume`'s ops ride
@@ -613,7 +644,7 @@ fn describe_all() -> (u8, String) {
 ///
 /// This crate can see both sides of that boundary, so this is where the two
 /// validators are made to agree.
-fn voxel_op_errors(scene: &loom_scene::Scene) -> Vec<serde_json::Value> {
+pub(crate) fn voxel_op_errors(scene: &loom_scene::Scene) -> Vec<serde_json::Value> {
     scene
         .nodes()
         .iter()
@@ -5094,20 +5125,20 @@ fn scene_tx(path: &str, args: &[String]) -> (u8, String) {
     // through this command could strip a level's ground with every step saying
     // ok.
     //
-    // Only when the transaction touches a `VoxelVolume`: this costs a second
-    // apply, and a gizmo drag firing every frame must not pay for it.
-    let touches_voxels = transaction.ops.iter().any(|op| {
-        matches!(op, loom_scene::SceneOp::SetField { field, .. }
-            | loom_scene::SceneOp::SpliceArray { field, .. }
-            if field.starts_with("VoxelVolume."))
-    });
-    if touches_voxels && !transaction.dry_run {
+    // Rehearsed on every real write, not only for voxels. This costs a second
+    // apply — cheap for one CLI invocation, and this is not the editor's hot
+    // path: a gizmo drag goes through `App::transact` in-process and never
+    // comes here.
+    if !transaction.dry_run {
         let mut rehearsal = transaction.clone();
         rehearsal.dry_run = true;
         match loom_scene::apply_to_file(std::path::Path::new(path), &rehearsal) {
             Ok(applied) => {
+                let base = std::path::Path::new(path)
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
                 if let Ok(scene) = loom_scene::Scene::parse(&applied.scene) {
-                    let errors = voxel_op_errors(&scene);
+                    let errors = post_apply_errors(&scene, base);
                     if !errors.is_empty() {
                         return (
                             1,
@@ -9122,6 +9153,63 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
             before,
             "the scene must be untouched when the transaction is refused"
         );
+    }
+
+    /// **Everything `loom validate` refuses, the write path refuses too.**
+    ///
+    /// Not only voxel ops: an alias nothing declares and a degenerate scale are
+    /// the same class — `Scene::parse` accepts them, `loom validate` does not,
+    /// and the renderer degrades rather than crashing, so the mesh or the
+    /// terrain quietly disappears with every command reporting success.
+    #[test]
+    fn a_write_that_validate_would_refuse_is_refused_and_changes_nothing() {
+        for (label, ops, expected) in [
+            (
+                "unresolved alias",
+                r#"[{"op":"spawn_node","parent":"Office","name":"Ghost","mesh":"no_such_alias"}]"#,
+                "unresolved_alias",
+            ),
+            (
+                "degenerate scale",
+                r#"[{"op":"set_transform","node":"Office/Desk","scale":[0.0,1.0,1.0]}]"#,
+                "degenerate_scale",
+            ),
+        ] {
+            let dir = std::env::temp_dir().join(format!("loom-tx-gate-{}", expected));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let scene = dir.join("scene.loom");
+            let before = std::fs::read_to_string("../../assets/test/office.loom").expect("fixture");
+            std::fs::write(&scene, &before).expect("copy");
+            let tx = dir.join("tx.json");
+            std::fs::write(&tx, format!(r#"{{"label":"{label}","ops":{ops}}}"#)).expect("tx");
+
+            let (code, out) = run(&args(&[
+                "scene",
+                &scene.to_string_lossy(),
+                "--tx",
+                &tx.to_string_lossy(),
+            ]));
+
+            assert_eq!(code, 1, "{label} should be refused: {out}");
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["error"], "would_produce_invalid_scene", "{label}");
+            let codes: Vec<&str> = v["errors"]
+                .as_array()
+                .expect("the errors travel")
+                .iter()
+                .filter_map(|e| e.get("error")?.as_str().or_else(|| e.get("code")?.as_str()))
+                .collect();
+            assert!(
+                codes.contains(&expected) || out.contains(expected),
+                "{label}: expected {expected} in {out}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&scene).unwrap(),
+                before,
+                "{label}: the scene must be untouched"
+            );
+        }
     }
 
     /// And a well-formed op still applies — the gate must refuse the broken

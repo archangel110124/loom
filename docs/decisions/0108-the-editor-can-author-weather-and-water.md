@@ -312,6 +312,55 @@ callers — it is a `WaveSet` object this op cannot address — and called
 deterministic body returns `constraint: "extent only on simulation =
 \"cinematic\""`, which names the field, the rule and the fix. The vague
 `"a readable WaterBody"` string it saw belongs to a different path — a
-component that fails to deserialise at all — and that one carries the serde
-error in its hint. Reported here because a finding checked and dismissed is
-worth as much as one acted on.
+component that fails to deserialise at all. Reported here because a finding
+checked and dismissed is worth as much as one acted on.
+
+*(Corrected in the fifth addendum: that path does carry the serde error in its
+hint at the `SceneError`, and the transaction layer was throwing the hint away
+before anyone could read it. So the sentence was true one layer down and false
+where an author actually meets it — this file's own signature failure, in the
+paragraph dismissing a report of it.)*
+
+## Fifth addendum — 2026-09-09 · **8.0, PASS**
+
+The fifth pass scored **8.0 and passed**, the first with no dead button
+reachable from a default state and no silent write. Trajectory: 7 → 7.5 → 7 →
+7.5 → 8. It named three things anyway, all now closed.
+
+**The two validators now agree everywhere, not only about voxels.** The fourth
+addendum closed the `VoxelVolume` case; the class had two more members, and the
+critic produced both. `spawn_node` with a mesh alias nothing declares, and a
+`set_transform` scale of zero: `Scene::parse` accepts each, `loom validate`
+refuses each, and the renderer degrades rather than crashing — so the mesh or
+the object quietly disappears with every command reporting success.
+
+`post_apply_errors` is now the whole of the difference between the two, in one
+function: the op-list check, the alias resolution, and the blocking physics
+findings. `loom scene --tx` rehearses **every** real write through it, not just
+volume-touching ones — a second apply is nothing for one CLI invocation, and
+the editor's hot path never comes here.
+
+**The editor closes its own side.** `App::transact` runs the op-list check
+after a transaction that touches a volume and undoes it if the result would not
+load. Without that, "the same op path whether a human or an agent did it" had
+an asymmetry in it: the CLI refused what the window accepted.
+
+**A refusal carries its diagnosis again.** `TransactionError` kept the first
+error's `constraint` and threw away its `field`, its `hint` and every error
+after it — so `Scene::parse`'s deliberate "return *all* the problems" (format
+doc §6, written to stop an agent round-tripping once per fix) was discarded at
+the interface an agent actually uses. `WaterBody.extent = [10, 10]` said "a
+readable WaterBody" and nothing else; it now says *"invalid length 2, expected
+an array of length 3"*, names the field, and carries the full list in `errors`.
+
+That last one also makes the fourth addendum's dismissal of the vague-refusal
+report **half wrong**, and it is corrected in place above. The hint existed; the
+transaction layer ate it. The report was right about what an author sees and
+wrong about why — which is a better outcome than this file managed, since the
+paragraph dismissing it asserted the opposite of the code one layer up.
+
+Left open, deliberately: the nested Gerstner wave list (`WaterBody.waves.waves`)
+is read-only in the Inspector, `SpliceArray` documents why it cannot address it,
+and the spectrum path — the FFT sea this work was about — is fully editable. And
+`docs/known-intermittent-teardown-leak.md`, which is an engine defect rather than
+an editor one.

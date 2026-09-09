@@ -3275,6 +3275,11 @@ impl App {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        let touches_voxels = ops.iter().any(|op| {
+            matches!(op, loom_scene::SceneOp::SetField { field, .. }
+                | loom_scene::SceneOp::SpliceArray { field, .. }
+                if field.starts_with("VoxelVolume."))
+        });
         let transaction = loom_scene::Transaction {
             label,
             ops,
@@ -3287,6 +3292,36 @@ impl App {
         };
         match outcome {
             Ok(_) => {
+                // **The same gate `loom scene --tx` applies, in-process.**
+                // `Scene::parse` cannot see inside a `VoxelVolume`'s op list —
+                // its vocabulary lives in `loom_voxel`, which `loom_scene` may
+                // not depend on — so a bad op applies, `loom validate` refuses
+                // the file, and the renderer degrades rather than crashing:
+                // the terrain disappears with nothing reporting a failure. The
+                // CLI refuses that; without this the editor would still accept
+                // it, and "the same op path whether a human or an agent did it"
+                // would have an asymmetry in it.
+                //
+                // Only for transactions that touch a volume. A gizmo drag fires
+                // every frame and must not pay to re-check a scene it cannot
+                // have broken.
+                if touches_voxels
+                    && let Some(session) = self.session.as_mut()
+                {
+                    let bad = loom_scene::Scene::parse(session.text())
+                        .map(|scene| crate::voxel_op_errors(&scene))
+                        .unwrap_or_default();
+                    if let Some(first) = bad.first() {
+                        let why = first
+                            .get("constraint")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("the volume would not load");
+                        crate::log::error(format!("rejected: {why}"));
+                        session.undo();
+                        self.resync();
+                        return;
+                    }
+                }
                 self.dirty = true;
                 self.resync();
                 self.reapply_to_play();

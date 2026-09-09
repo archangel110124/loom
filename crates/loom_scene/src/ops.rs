@@ -224,6 +224,21 @@ pub struct TransactionError {
     /// is no `format` bump and nothing on disk changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub op_index: Option<usize>,
+    /// **Every problem with the result, not the first one's summary.**
+    ///
+    /// `Scene::parse` returns *all* the errors it found, on purpose: the format
+    /// doc §6 says an agent correcting one field at a time round-trips once per
+    /// error, which is the retry loop the whole design exists to avoid. This
+    /// used to keep the first error's `constraint` and throw the rest away —
+    /// along with its `field` and its `hint`, which is where a
+    /// `component_unreadable` carries the serde message that says *what* was
+    /// unreadable. The result was refusals like "a readable WaterBody" with no
+    /// field, no cause, and no second error.
+    ///
+    /// Empty for failures that are not about the resulting scene: a stale
+    /// version, a bad op, an unknown node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<crate::scene::SceneError>,
 }
 
 impl std::fmt::Display for TransactionError {
@@ -272,6 +287,7 @@ pub fn apply_with(
             hint,
             current: None,
             op_index: None,
+            errors: Vec::new(),
         })
     };
     // As `fail`, for the failures that belong to one op.
@@ -285,6 +301,7 @@ pub fn apply_with(
                 hint,
                 current: None,
                 op_index: None,
+            errors: Vec::new(),
             };
             e.op_index = Some(index);
             Box::new(e)
@@ -309,6 +326,7 @@ pub fn apply_with(
             ),
             current: Some(source.to_owned()),
             op_index: None,
+            errors: Vec::new(),
         }));
     }
 
@@ -335,12 +353,23 @@ pub fn apply_with(
     // scene and call it success.
     Scene::parse(&after).map_err(|errors| {
         let first = errors.first();
-        fail(
+        let mut error = fail(
             "would_produce_invalid_scene",
             first.map_or_else(|| "unknown".to_owned(), |e| e.constraint.clone()),
             first.map(|e| e.node.clone()),
-            Some("The transaction was rejected whole; the scene is unchanged.".to_owned()),
-        )
+            // The first error's own guidance where it has some — a
+            // `component_unreadable` carries the serde message that names the
+            // field it choked on, and dropping it left "a readable WaterBody"
+            // as the whole of what a caller was told.
+            first
+                .and_then(|e| e.hint.clone())
+                .map_or_else(
+                    || Some("The transaction was rejected whole; the scene is unchanged.".to_owned()),
+                    |hint| Some(format!("{hint} The transaction was rejected whole; the scene is unchanged.")),
+                ),
+        );
+        error.errors = errors;
+        error
     })?;
 
     Ok(Applied {
