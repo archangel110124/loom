@@ -925,6 +925,13 @@ impl App {
         scene_path: std::path::PathBuf,
         disk_seen: loom_scene::VersionToken,
     ) -> Self {
+        // **One spelling of where this scene is.** The browser lists absolute
+        // paths, because the walk that finds them starts from an absolute root;
+        // a scene opened as `assets/test/ocean_fft.loom` then matched none of
+        // them and the Project panel showed nothing as open. The comparison
+        // could be made clever instead, but two spellings of one path in one
+        // program is the thing that goes wrong later, not the comparison.
+        let scene_path = std::fs::canonicalize(&scene_path).unwrap_or(scene_path);
         let base = scene_path
             .parent()
             .unwrap_or(std::path::Path::new("."))
@@ -3400,20 +3407,23 @@ impl App {
     /// of which 130 are test fixtures.
     fn sibling_scenes(&self) -> Vec<String> {
         let mut found = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&self.base) else {
-            return found;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "loom")
-                && let Some(text) = path.to_str()
-            {
-                found.push(text.to_owned());
-            }
-        }
-        found.sort();
+        walk_for_scenes(&project_root(&self.base), 0, &mut found);
+        // **By folder, then by name.** A plain sort interleaves a directory's
+        // files with its subdirectories — `assets/test/prefabs/a.loom` lands
+        // between `assets/test/ocean.loom` and `assets/test/squall.loom` — and
+        // the panel, which groups runs of equal folders, then showed
+        // `assets/test` twice with a duplicate egui id between them.
+        found.sort_by(|a, b| {
+            let split = |s: &String| {
+                let (dir, file) = s.rsplit_once('/').unwrap_or((".", s));
+                (dir.to_owned(), file.to_owned())
+            };
+            split(a).cmp(&split(b))
+        });
         found
     }
+
+
 
     /// Open a different scene — ADR 0093.
     ///
@@ -4881,6 +4891,94 @@ fn replace_scene_id(text: &str, id: &str) -> String {
     text
 }
 
+/// The scene `loom run --edit` opens when nobody named one — ADR 0104.
+///
+/// **A game first, then anything.** Landing in `assets/test/alpha_cutout.loom`
+/// because it sorts first would be technically a scene and practically a
+/// confusing place to arrive. What somebody means by "open the editor" is the
+/// thing they are building, and in this tree that is `assets/games`.
+///
+/// Returns `None` only when there is no scene anywhere under the root, which is
+/// a project with nothing in it rather than a failure worth a message about
+/// paths.
+pub(crate) fn default_scene(from: &std::path::Path) -> Option<String> {
+    let root = project_root(from);
+    let mut found = Vec::new();
+    walk_for_scenes(&root, 0, &mut found);
+    found.sort();
+    let games = root.join("assets").join("games");
+    let games = games.to_string_lossy();
+    found
+        .iter()
+        .find(|scene| scene.starts_with(games.as_ref()))
+        .or_else(|| found.first())
+        .cloned()
+}
+
+
+pub(crate) fn project_root(base: &std::path::Path) -> std::path::PathBuf {
+    // **Absolute first, or walking up ends at the working directory's edge
+    // rather than the project's.** `loom run assets/test/ocean_fft.loom` gives
+    // a base of `assets/test`, whose second parent is the empty path — and the
+    // scene list came back empty, so opening a test scene silently lost the
+    // browser that was the point of this.
+    let absolute = std::fs::canonicalize(base).unwrap_or_else(|_| {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(base)
+    });
+    let mut here = absolute.as_path();
+    loop {
+        if here.join("assets").is_dir() {
+            return here.to_path_buf();
+        }
+        // `assets/test/x.loom` is inside the tree rather than above it, so
+        // a directory literally named `assets` is a root too.
+        if here.file_name().is_some_and(|n| n == "assets") {
+            return here.parent().unwrap_or(here).to_path_buf();
+        }
+        match here.parent() {
+            Some(up) => here = up,
+            None => return absolute.clone(),
+        }
+    }
+}
+
+/// Every `.loom` under `dir`, depth-limited and blind to build output.
+///
+/// **A bounded walk, not a full one.** `target/` holds a copy of the asset
+/// tree per profile and would list every scene three times; the depth cap
+/// stops a symlink loop from hanging the editor on a directory nobody meant
+/// to scan.
+pub(crate) fn walk_for_scenes(dir: &std::path::Path, depth: u32, found: &mut Vec<String>) {
+    const MAX_DEPTH: u32 = 6;
+    const MAX_SCENES: usize = 512;
+    if depth > MAX_DEPTH || found.len() >= MAX_SCENES {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if path.is_dir() {
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            walk_for_scenes(&path, depth + 1, found);
+        } else if path.extension().is_some_and(|e| e == "loom")
+            && let Some(text) = path.to_str()
+        {
+            found.push(text.to_owned());
+            if found.len() >= MAX_SCENES {
+                return;
+            }
+        }
+    }
+}
+
 pub fn open_scene(
     path: &str,
     editable: bool,
@@ -4908,6 +5006,72 @@ pub fn open_scene(
 
 #[cfg(test)]
 mod tests {
+
+    /// **The root is found, not configured** — ADR 0104. The failure this
+    /// guards is the quiet one: a root that resolves to the wrong directory
+    /// lists no scenes, and an empty browser reads as "this project has one
+    /// file" rather than "the walk started in the wrong place".
+    #[test]
+    fn the_project_root_is_the_directory_holding_assets() {
+        let root = std::env::temp_dir().join("loom-project-root-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("assets/test/prefabs")).expect("tree");
+        let root = std::fs::canonicalize(&root).expect("canonical");
+
+        for from in [
+            root.join("assets/test/prefabs"),
+            root.join("assets/test"),
+            root.join("assets"),
+            root.clone(),
+        ] {
+            assert_eq!(
+                super::project_root(&from),
+                root,
+                "walking up from {}",
+                from.display()
+            );
+        }
+    }
+
+    /// **A relative path must not walk off the top.** `assets/test` has two
+    /// parents and then the empty path, so the walk ended above nothing and the
+    /// browser came back empty — which is how opening a test scene silently
+    /// lost the scene list.
+    #[test]
+    fn a_relative_base_still_finds_the_root() {
+        // Run from this crate's directory, so `../../assets` is the repository's
+        // own — the same relative shape `loom run assets/test/x.loom` produces.
+        let found = super::project_root(std::path::Path::new("../../assets/test"));
+
+        assert!(
+            found.is_absolute(),
+            "a relative base must resolve to somewhere real, got {}",
+            found.display()
+        );
+        assert!(
+            found.join("assets").is_dir(),
+            "the root must be the directory holding assets, got {}",
+            found.display()
+        );
+    }
+
+    /// **A game before a test fixture.** Opening the editor with no scene named
+    /// should land in the thing being built, not in whatever sorts first.
+    #[test]
+    fn the_default_scene_prefers_a_game() {
+        let root = std::env::temp_dir().join("loom-default-scene-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("assets/games")).expect("tree");
+        std::fs::create_dir_all(root.join("assets/test")).expect("tree");
+        std::fs::write(root.join("assets/test/aaa_first.loom"), "[scene]\n").expect("fixture");
+        std::fs::write(root.join("assets/games/zzz_game.loom"), "[scene]\n").expect("game");
+
+        let chosen = super::default_scene(&root).expect("a scene exists");
+        assert!(
+            chosen.ends_with("zzz_game.loom"),
+            "should prefer the game even though the fixture sorts first: {chosen}"
+        );
+    }
 
     /// **A saved copy is a different scene.** `save_as` wrote the session
     /// verbatim, so the duplicate kept the original's id and the two files

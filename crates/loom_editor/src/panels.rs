@@ -1005,31 +1005,103 @@ pub(crate) fn assets(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Ve
     // **Scenes first, because switching between them used to mean restarting.**
     // A project is more than one file and an editor that can only ever show the
     // one named on the command line is a viewer.
+    //
+    // **Grouped by folder and filterable, because the list is now the project
+    // rather than one directory** — ADR 0104. This repository has 130-odd
+    // scenes; a flat wrapped strip of them is a wall, and the folder a scene
+    // lives in is most of what tells you what it is.
     if !state.scenes.is_empty() {
-        ui.heading("Scenes");
-        if state.dirty {
-            ui.weak("save first — opening another scene would lose unsaved edits");
+        ui.horizontal(|ui| {
+            ui.heading("Scenes");
+            ui.weak(format!("{}", state.scenes.len()));
+            if state.dirty {
+                ui.weak("— save first, opening another would lose unsaved edits");
+            }
+        });
+        let filter_id = ui.id().with("scene_filter");
+        let mut needle: String = ui.data(|d| d.get_temp(filter_id).unwrap_or_default());
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut needle)
+                    .hint_text("filter scenes…")
+                    .desired_width(220.0),
+            )
+            .changed()
+        {
+            ui.data_mut(|d| d.insert_temp(filter_id, needle.clone()));
         }
-        egui::ScrollArea::horizontal().id_salt("scene_list").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for scene in state.scenes {
-                    let open = scene == state.open_scene;
-                    let name = scene.rsplit('/').next().unwrap_or(scene);
-                    let button = egui::Button::new(if open {
-                        format!("▶ {name}")
-                    } else {
-                        format!("  {name}")
-                    });
-                    if ui
-                        .add_enabled(!open && !state.dirty, button)
-                        .on_hover_text(scene)
-                        .clicked()
-                    {
-                        actions.push(UiAction::OpenScene(scene.clone()));
-                    }
+        let needle = needle.to_lowercase();
+
+        // Group by the directory each scene sits in. The caller sorts by
+        // (folder, name), so equal folders are contiguous and a run is a group.
+        let mut groups: Vec<(&str, Vec<&String>)> = Vec::new();
+        for scene in state.scenes {
+            if !needle.is_empty() && !scene.to_lowercase().contains(&needle) {
+                continue;
+            }
+            let folder = scene.rsplit_once('/').map_or(".", |(dir, _)| dir);
+            match groups.last_mut() {
+                Some((last, list)) if *last == folder => list.push(scene),
+                _ => groups.push((folder, vec![scene])),
+            }
+        }
+        if groups.is_empty() {
+            ui.weak("nothing matches that");
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("scene_list")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                // Folders are absolute and mostly the same prefix; showing
+                // `/home/somebody/loom/assets/games` on every row is noise
+                // around the one word that distinguishes it.
+                let shared = groups
+                    .iter()
+                    .map(|(folder, _)| *folder)
+                    .reduce(|a, b| {
+                        let take = a
+                            .char_indices()
+                            .zip(b.chars())
+                            .take_while(|((_, x), y)| x == y)
+                            .map(|((i, c), _)| i + c.len_utf8())
+                            .last()
+                            .unwrap_or(0);
+                        // Cut at a separator, so half a directory name never
+                        // becomes the prefix.
+                        &a[..a[..take].rfind('/').map_or(0, |i| i + 1)]
+                    })
+                    .unwrap_or("");
+                for (folder, scenes) in &groups {
+                    let shown = folder.strip_prefix(shared).unwrap_or(folder);
+                    // Open by default when filtering: a search that hides its
+                    // own results behind a twisty is a search that looks broken.
+                    let holds_open = scenes.iter().any(|s| *s == state.open_scene);
+                    egui::CollapsingHeader::new(format!("{shown}  ({})", scenes.len()))
+                        .id_salt(("scene_group", folder))
+                        .default_open(holds_open || !needle.is_empty())
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for scene in scenes {
+                                    let open = *scene == state.open_scene;
+                                    let name = scene.rsplit('/').next().unwrap_or(scene);
+                                    let button = egui::Button::new(if open {
+                                        format!("▶ {name}")
+                                    } else {
+                                        format!("  {name}")
+                                    });
+                                    if ui
+                                        .add_enabled(!open && !state.dirty, button)
+                                        .on_hover_text(*scene)
+                                        .clicked()
+                                    {
+                                        actions.push(UiAction::OpenScene((*scene).clone()));
+                                    }
+                                }
+                            });
+                        });
                 }
             });
-        });
         ui.separator();
     }
 

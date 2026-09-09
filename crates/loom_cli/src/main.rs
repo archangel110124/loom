@@ -216,9 +216,14 @@ USAGE:
                               [--frames <n>] [--size <WxH>] [--steps <n>]
         Carve the voxel terrain and render the result.
 
-    loom run <scene.loom> [--edit] [--frames <n>] [--play]
+    loom run [<scene.loom>] [--edit] [--frames <n>] [--play]
                           [--shot <file.png>] [--hold <k=v,..>] [--menu]
         Open the viewer. --edit gives the full editor; it reloads on change.
+
+        `loom run --edit` with no scene opens the project's own — the first
+        under `assets/games` — and the Project panel lists every scene in the
+        tree, grouped by folder, so any of them is one click away. The project
+        root is the nearest ancestor holding an `assets/` directory.
         --frames closes after n frames and then prints the frame's CPU cost;
         --play starts the simulation immediately, which is the only way to
         measure the per-frame work a running game actually does.
@@ -498,8 +503,18 @@ fn run(args: &[String]) -> (u8, String) {
             Some(path) => water(path, args),
             None => (2, USAGE.to_owned()),
         },
-        Some("run") => match args.get(1) {
+        // **A flag in the scene's place means no scene was named** — ADR 0104.
+        // `loom run --edit` is how somebody opens the editor without having
+        // decided which project yet, and without this it opens a file called
+        // `--edit` and reports that it does not exist.
+        Some("run") => match args.get(1).filter(|a| !a.starts_with("--")).cloned().or_else(|| {
+            args.iter()
+                .any(|a| a == "--edit")
+                .then(|| run::default_scene(&std::env::current_dir().unwrap_or_default()))
+                .flatten()
+        }) {
             Some(path) => {
+                let path = &path;
                 let frames = flag(args, "--frames").and_then(|n| n.parse::<u32>().ok());
                 let hold = match held_input(args) {
                     Ok(tape) => tape.unwrap_or_default(),
