@@ -89,3 +89,48 @@ defaulted into silence", so there is no default a button could write that would
 load. Copying the component from a node that has one brings it across, and the
 CLI or the agent can author one. Inventing plausible physics numbers in a button
 is the thing this project does not do.
+
+## Addendum, after the critic — 2026-09-09
+
+A fable critic graded the editor 7/10 against the bar of 8 and found three
+things this ADR had missed or half-fixed.
+
+**The whole of a component, not the part written down.** The Inspector walked
+the node's *stored* table, so a field the author never wrote did not appear —
+and since TOML cannot hold a null, every optional field of every component was
+invisible **by construction**. `WaterBody` showed seven of sixteen. `swell`,
+`fetch`, `flow` and `extent` were not "read-only" as this ADR first said; they
+were simply absent, with no way to reach them at all. It now walks the union of
+the stored keys and the schema's, both alphabetical so they interleave in place
+rather than appending a second block, with an unwritten field showing the value
+that is actually in effect — its schema default.
+
+An optional field whose default is `null` shows **not set** with a `set` button
+that writes the schema's own `minimum` — the smallest value its author declared
+legal, so nothing is invented here. `Rain.duration` becomes a shower of zero
+seconds you drag out; `WaterBody.fetch` becomes one metre you drag up. An
+optional *object* gets no button, and that is deliberate: `Swell`'s fields are
+documented as refused at load rather than defaulted into silence, so any value a
+button could write would be rejected, and a button that always fails is worse
+than none — the mistake ADR 0101 already fixed once in "+ add". The hover names
+the two paths that do work: copy the component from a node that has one, or
+author it with `loom scene --tx`.
+
+**An intermittent crash in the command the docs verify water with.**
+`sample_water` asserts, debug-only, that the cascade is asked about the tick it
+was evolved to. `loom water` and the `water@` assertion path each computed
+`ticks / 60.0` while the step accumulated `tick * (1.0 / 60.0)`. Those are a
+last bit apart at some tick counts and equal at others: `--sim 300` panicked
+with `t = 5.0000005` against `t = 5`, and `--sim 301` was fine. The fix already
+existed in `submerge_eye`, whose comment names these two callers by name and
+explains the arithmetic — written, and never applied to them. Both now ask the
+ocean for its own instant, and `loom water` reports that instant, since its
+output documents `seconds` as what the waves were evaluated at.
+
+**A design doc that had become false.** `docs/design/EDITOR-SCOPE.md` still said
+four tabs render "not built yet", that there is no snap, no hierarchy filter and
+no profiler in the UI. All four were built between then and now. It opens by
+promising every claim in it was verified — so it had become the exact failure it
+was written to avoid, and a reader came away with four false beliefs. It now
+carries a superseded header naming what changed and where; its comparison
+against Unity, Unreal and Godot, and the gaps it lists, still stand.

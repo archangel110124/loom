@@ -1,5 +1,35 @@
 # The editor, scoped against Unity, Unreal and Godot
 
+> ## Superseded in part — read this first
+>
+> **§1 and §2 describe the editor as it stood on 2026-09-07 and are now wrong in
+> specifics.** They were a worklist, the worklist got done, and nothing said so —
+> which by this project's own first rule ("never state a checkable fact you
+> haven't checked") makes them the exact failure they were written to avoid. A
+> critic reading them on 2026-09-09 came away with four false beliefs.
+>
+> Corrected, with where the work landed:
+>
+> | This doc says | Actually |
+> |---|---|
+> | Problems, History, Prefabs and Agent render `"not built yet"` | All four are built — ADRs 0093, 0100, 0101 |
+> | No `snap` anywhere in `loom_editor` | `Snap` is in the toolbar and in `gizmo.rs` — ADR 0099 |
+> | The Hierarchy has no filter box | It has one — ADR 0093 |
+> | Nothing surfaces the profiler numbers in the UI | A Profiler tab, with a frame graph — ADR 0106 |
+>
+> Since then the editor has also gained: a project-wide scene browser and a
+> no-scene launch (0104), asset import by drag-and-drop (0105), component
+> copy/paste (0107), agent proposals with Apply/Discard (0103), nested-object
+> editing and the Add Component null fix (0108).
+>
+> **§3 onward — the comparison against Unity, Unreal and Godot, and what is still
+> genuinely absent — stands.** The gaps it names (no animation tooling, no
+> in-editor scripting, `.obj`/`.png` import only, no game-UI designer, no terrain
+> brush, no build UI) are all still real.
+>
+> The ADRs in `docs/decisions/0088`–`0108` are the current record. This file is
+> kept for its comparison and its reasoning, not for its status table.
+
 **Written 2026-09-07, overnight.** Every "has" below was verified by reading the
 code, not by remembering it. Twice in this project a survey has claimed
 something was missing when it existed under a different name — "no rebinding"

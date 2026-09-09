@@ -2354,15 +2354,17 @@ fn field_label(ui: &mut egui::Ui, field: &str, doc: &str, constraint: Option<Str
             .halign(egui::Align::LEFT)
             .truncate(),
     );
+    // **The name leads the tooltip, because the label truncates.** `LABEL_WIDTH`
+    // is fixed, so `surface_height` reads `surface_heig…` at the default panel
+    // width — and a field with no doc comment had no hover at all, leaving no
+    // way to find out what it was called without widening the panel.
     let tip = match (doc.is_empty(), constraint) {
-        (true, None) => String::new(),
-        (true, Some(c)) => c,
-        (false, None) => doc.to_owned(),
-        (false, Some(c)) => format!("{doc}\n\n{c}"),
+        (true, None) => field.to_owned(),
+        (true, Some(c)) => format!("{field}\n\n{c}"),
+        (false, None) => format!("{field}\n\n{doc}"),
+        (false, Some(c)) => format!("{field}\n\n{doc}\n\n{c}"),
     };
-    if !tip.is_empty() {
-        label = label.on_hover_text(tip);
-    }
+    label = label.on_hover_text(tip);
     let _ = label;
 }
 
@@ -2392,7 +2394,40 @@ fn inspect_component(
         return;
     };
 
-    for (field, current) in fields {
+    // **Every field the component has, not only the ones on disk.**
+    //
+    // The loop used to walk the node's *stored* table, so a field the author
+    // never wrote simply did not appear — and TOML cannot hold a null, so every
+    // optional field of every component was invisible in the editor by
+    // construction. `WaterBody` showed seven of its sixteen; `swell`, `fetch`,
+    // `flow` and `extent` were not "read-only", they were absent, and there was
+    // no way to reach them at all. Unity, Unreal and Godot all show a
+    // component's whole surface, and so must this.
+    //
+    // Both orders are alphabetical — `serde_json::Map` here, schemars'
+    // properties there — so the union interleaves rather than appending a
+    // second block, and a field appears where it belongs. Unknown keys the
+    // schema does not name still show: they are in the file, so the human has
+    // to be able to see them.
+    let unwritten: Vec<&String> = properties
+        .map(|p| p.keys().filter(|k| !fields.contains_key(*k)).collect())
+        .unwrap_or_default();
+    let mut rows: Vec<(&String, Option<&serde_json::Value>)> = fields
+        .iter()
+        .map(|(field, current)| (field, Some(current)))
+        .chain(unwritten.into_iter().map(|field| (field, None)))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+
+    for (field, stored) in rows {
+        // A field not in the file has whatever the schema declares — which for
+        // an optional field is `null`, and that is what "not set" means.
+        let default = properties
+            .and_then(|p| p.get(field))
+            .and_then(|spec| spec.get("default"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let current = stored.unwrap_or(&default);
         let key = format!("{type_name}.{field}");
         // One walker, shared with the validator: `$ref` followed through
         // `$defs` and both spellings of an enum flattened. See
@@ -2424,6 +2459,41 @@ fn inspect_component(
 
             draw_field(ui, path, &key, field, current, schema, editable, ctx, actions);
         });
+    }
+}
+
+/// The value a "set" button should write into an absent optional field.
+///
+/// **The schema's own `minimum`, never a number chosen here.** The smallest
+/// value the field's author declared legal is a real answer; anything else would
+/// be this layer inventing a quantity it knows nothing about. `Some` only for a
+/// scalar — a nullable object's fields may be refused rather than defaulted, so
+/// there is nothing safe to write and the caller offers no button at all.
+#[must_use]
+pub fn optional_start(schema: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    // `type: ["number", "null"]` is how schemars spells an `Option<f32>`. An
+    // `Option<SomeStruct>` is an `anyOf` instead, and falls out here.
+    let types = schema?.get("type")?.as_array()?;
+    let nullable = types.iter().any(|t| t.as_str() == Some("null"));
+    let scalar = types.iter().find_map(|t| match t.as_str()? {
+        "null" => None,
+        other => Some(other),
+    })?;
+    if !nullable {
+        return None;
+    }
+    match scalar {
+        "number" | "integer" => {
+            let lo = schema?
+                .get("minimum")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            serde_json::Number::from_f64(lo).map(serde_json::Value::Number)
+        }
+        "boolean" => Some(serde_json::Value::Bool(false)),
+        // A nullable string has no smallest legal value, and an empty one is a
+        // guess about whether empty is allowed.
+        _ => None,
     }
 }
 
@@ -2632,18 +2702,46 @@ fn draw_field(
             }
         }
 
-        // **Absent, said plainly.** `null` used to fall through to the summary,
-        // which printed the word `null` in the same weak grey a real value uses.
+        // **Absent, said plainly — and settable where that is honest.** `null`
+        // used to fall through to the summary, printing the word `null` in the
+        // same weak grey a real value uses.
+        //
+        // A scalar optional gets a button, because the schema already names a
+        // value nobody has to invent: its `minimum`, the smallest thing its
+        // author declared legal. `Rain.duration` becomes a shower of zero
+        // seconds you drag out; `WaterBody.fetch` becomes one metre you drag up.
+        //
+        // An optional *object* does not, and that is not laziness. `Swell`'s
+        // fields are documented as "refused at load rather than defaulted into
+        // silence" — its defaults are deliberately values no sea can have — so
+        // any value this button could write would be rejected, and a button that
+        // always fails is worse than none. Copying the component from a node
+        // that has one is the path, and the hover says so.
         serde_json::Value::Null => {
-            ui.add(
-                egui::Label::new(egui::RichText::new("not set").weak().italics())
-                    .wrap(),
-            )
-            .on_hover_text(
-                "an optional field with no value — the CLI or the agent can \
-                 author one, and copying the component from another node \
-                 brings it across",
-            );
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(egui::RichText::new("not set").weak().italics()));
+                match optional_start(schema) {
+                    Some(start) => {
+                        if ui
+                            .add_enabled(editable, egui::Button::new("set").small())
+                            .on_hover_text(format!(
+                                "give it a value — starts at {start}, then drag"
+                            ))
+                            .clicked()
+                        {
+                            actions.push(set(start));
+                        }
+                    }
+                    None => {
+                        ui.weak("?").on_hover_text(
+                            "an optional group with no value. Its fields are refused \
+                             rather than defaulted, so there is nothing safe to write \
+                             here — copy the component from a node that has one, or \
+                             author it with `loom scene --tx`.",
+                        );
+                    }
+                }
+            });
         }
 
         serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_object) => {
@@ -3373,6 +3471,49 @@ name = \"A\"
             entry.get("phase").is_none(),
             "only required fields — an optional one left out keeps the file minimal"
         );
+    }
+
+    /// **"set" writes the schema's own minimum, or offers nothing.**
+    ///
+    /// A nullable object — `WaterBody.swell` — must get no button: `Swell`'s
+    /// fields are refused at load rather than defaulted, so every value this
+    /// could write would be rejected, and a button that always fails is worse
+    /// than no button. That mistake has been made in this editor before, in the
+    /// "+ add" that could never append a mood stage (ADR 0101).
+    #[test]
+    fn an_optional_scalar_can_be_set_and_an_optional_group_cannot() {
+        // `Rain.duration`, as schemars actually spells it.
+        let duration = serde_json::json!({
+            "type": ["number", "null"], "default": null,
+            "minimum": 0.0, "maximum": 86400.0,
+        });
+        assert_eq!(super::optional_start(Some(&duration)), Some(serde_json::json!(0.0)));
+
+        // `WaterBody.fetch` — the minimum is 1, not 0, and the button must not
+        // substitute a friendlier-looking zero the schema calls illegal.
+        let fetch = serde_json::json!({
+            "type": ["number", "null"], "default": null, "minimum": 1.0,
+        });
+        assert_eq!(super::optional_start(Some(&fetch)), Some(serde_json::json!(1.0)));
+
+        // `WaterBody.swell` — an `anyOf` of a `$ref` and null.
+        let swell = serde_json::json!({
+            "anyOf": [{ "$ref": "#/$defs/Swell" }, { "type": "null" }], "default": null,
+        });
+        assert_eq!(super::optional_start(Some(&swell)), None, "a group must offer no button");
+
+        // A nullable array (`WaterBody.extent`) has no smallest legal value
+        // either — three zeroes is a guess about what an extent of nothing means.
+        let extent = serde_json::json!({
+            "type": ["array", "null"], "default": null, "minItems": 3,
+        });
+        assert_eq!(super::optional_start(Some(&extent)), None);
+
+        // A plain required number is not optional and gets no button; it always
+        // has a value already.
+        let plain = serde_json::json!({ "type": "number", "minimum": 2.0 });
+        assert_eq!(super::optional_start(Some(&plain)), None);
+        assert_eq!(super::optional_start(None), None);
     }
 
     /// A declared `default` beats the type's empty value, because the schema

@@ -5649,6 +5649,19 @@ fn water(path: &str, args: &[String]) -> (u8, String) {
         }
         None => (wind, body),
     };
+    // **The cascade's own instant, not this command's clock** — the same fix
+    // `submerge_eye` carries, and its comment names this caller by name. This
+    // path computes `ticks / 60.0` while the step accumulated
+    // `tick * (1.0 / 60.0)`; they are a last bit apart at some tick counts and
+    // equal at others, so `loom water --sim 300` panicked on the debug assert
+    // with `t = 5.0000005` against `t = 5` while `--sim 301` was fine. An
+    // intermittent crash in the command the docs point at for verifying water.
+    //
+    // Reported as well as sampled: `seconds` is documented below as "what the
+    // waves were evaluated at", so it has to be the instant they were.
+    let seconds = sea
+        .as_ref()
+        .map_or(seconds, loom_water::ocean::Ocean::evolved_at);
     let sample =
         loom_water::sample_water(&body, sea.as_ref(), at, seconds, ground, flow, ripple);
     // `sample_water` sums the orbital motion onto the current, so the wave half
@@ -9075,6 +9088,40 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["error"], "no_such_node");
         assert_eq!(v["value"], "Office/Nope");
+    }
+
+    /// **An intermittent crash in the command the docs verify water with.**
+    ///
+    /// `sample_water` asserts (debug-only) that the cascade is asked about the
+    /// tick it was evolved to. `loom water` computed `ticks / 60.0` while the
+    /// step accumulated `tick * (1.0 / 60.0)`; those are a last bit apart at
+    /// some tick counts and equal at others, so `--sim 300` panicked with
+    /// `t = 5.0000005` against `t = 5` and `--sim 301` was fine.
+    ///
+    /// 300 and 600 are the two counts that reproduced it; 301 is the neighbour
+    /// that did not, kept so a fix that simply rounds is not mistaken for one
+    /// that asks the ocean.
+    #[test]
+    fn the_water_probe_asks_the_ocean_for_its_own_instant() {
+        for ticks in ["300", "301", "600"] {
+            let (code, out) = run(&args(&[
+                "water",
+                "../../assets/test/ocean_fft.loom",
+                "--at",
+                "3.5,-24",
+                "--sim",
+                ticks,
+            ]));
+
+            assert_eq!(code, 0, "--sim {ticks}: {out}");
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["ok"], true, "--sim {ticks}: {out}");
+            // Reported as well as sampled: `seconds` is documented as what the
+            // waves were evaluated at, so it must be the cascade's instant and
+            // not the caller's arithmetic.
+            let seconds = v["seconds"].as_f64().expect("seconds is a number");
+            assert!(seconds > 0.0, "--sim {ticks} reported {seconds}");
+        }
     }
 
     /// **The Create menu and the mesh builder must offer the same shapes.**

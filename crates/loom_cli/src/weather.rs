@@ -125,13 +125,36 @@ impl WaterProbe {
     /// wants to know is whether there is foam here, and between the field and
     /// the instantaneous term that question is answered.
     pub fn foam_at(&self, xz: [f32; 2], seconds: f32) -> f32 {
+        // `at` re-resolves the clock; the instantaneous term below must use the
+        // same one or the two halves of this number describe two instants.
+        let seconds = self
+            .sea
+            .as_ref()
+            .map_or(seconds, loom_water::ocean::Ocean::evolved_at);
         let mu = self.at(xz, seconds).mu_max;
         let field = self.foam.as_ref().map_or(0.0, |f| f.at(xz[0], xz[1]));
         instant_foam(mu, xz, seconds).max(field)
     }
 
     /// The surface at a world XZ, at the tick the run ended on.
+    ///
+    /// **The cascade's own instant, not the caller's clock** — the same fix
+    /// `submerge_eye` carries, and its comment names this caller. The tiles hold
+    /// no time of their own, so `sample_water` asserts (debug-only) that it is
+    /// asked about the tick they were evolved to, and the two clocks are spelled
+    /// differently: the run accumulates `tick * (1.0 / 60.0)` while an assertion
+    /// computes `ticks / 60.0`. Those are a last bit apart at some tick counts
+    /// and equal at others — `--sim 300` panics with `t = 5.0000005` against
+    /// `t = 5`, `--sim 301` is fine — which made `water@` assertions and
+    /// `loom water` crash intermittently on the repository's own FFT scene.
+    ///
+    /// For a `gerstner` body there is no cascade and the caller's clock is the
+    /// only one there is, which is every scene before ADR 0076.
     pub fn at(&self, xz: [f32; 2], seconds: f32) -> loom_water::WaterSample {
+        let seconds = self
+            .sea
+            .as_ref()
+            .map_or(seconds, loom_water::ocean::Ocean::evolved_at);
         let ground = self
             .bed
             .as_ref()
