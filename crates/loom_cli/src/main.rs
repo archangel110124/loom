@@ -42,8 +42,10 @@ USAGE:
     loom validate <scene.loom>
         Validate a scene and report its version token. Exit 1 with JSON errors.
 
-    loom describe <TypeName>
-        Print a component's JSON Schema. No argument lists the known types.
+    loom describe [<TypeName>]
+        Print a component's JSON Schema. No argument lists every type with its
+        one-line summary — the same registry the editor's Add Component menu
+        reads, so the two cannot disagree about what exists.
 
     loom render <scene.loom> [--out <f.png>] [--size <WxH>] [--sim <ticks>]
                              [--yaw <deg>] [--pitch <deg>] [--hold <k=v,..>]
@@ -429,9 +431,13 @@ fn run(args: &[String]) -> (u8, String) {
             Some(path) => validate(path),
             None => (2, USAGE.to_owned()),
         },
+        // **The usage said "No argument lists the known types" and it did not
+        // — it printed the usage and exited 2.** Which is a small lie about a
+        // small command, except that "what can I add to this scene?" is the
+        // first question an agent asks and the answer was nowhere.
         Some("describe") => match args.get(1) {
             Some(name) => describe(name),
-            None => (2, USAGE.to_owned()),
+            None => describe_all(),
         },
         Some("render") => match args.get(1) {
             Some(path) => render(path, args),
@@ -559,6 +565,39 @@ fn run(args: &[String]) -> (u8, String) {
         },
         _ => (2, USAGE.to_owned()),
     }
+}
+
+/// Every component type, with its one-line summary.
+///
+/// The same registry the editor's Add Component menu reads, so the two cannot
+/// disagree about what exists.
+fn describe_all() -> (u8, String) {
+    let registry = loom_scene::components::registry();
+    let types: Vec<serde_json::Value> = registry
+        .type_names()
+        .map(|name| {
+            // The first line of the schema's description: the whole thing is
+            // paragraphs, and a listing wants a label.
+            let summary = registry
+                .describe(name)
+                .and_then(|schema| {
+                    schema
+                        .as_value()
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|d| d.lines().next().unwrap_or_default().to_owned())
+                })
+                .unwrap_or_default();
+            serde_json::json!({ "type": name, "summary": summary })
+        })
+        .collect();
+    (
+        0,
+        json_line(&serde_json::json!({
+            "types": types,
+            "hint": "`loom describe <TypeName>` prints one type's full JSON Schema.",
+        })),
+    )
 }
 
 fn validate(path: &str) -> (u8, String) {
@@ -9036,6 +9075,25 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["error"], "no_such_node");
         assert_eq!(v["value"], "Office/Nope");
+    }
+
+    /// **The Create menu and the mesh builder must offer the same shapes.**
+    /// `loom_editor` cannot depend on `loom_asset`, so its `PRIMITIVES` is a
+    /// copy — and a sixth primitive added to the engine but not to that list is
+    /// a shape the editor silently cannot make. This crate sees both.
+    #[test]
+    fn the_create_menu_offers_exactly_the_primitives_the_engine_builds() {
+        let menu: Vec<&str> = loom_editor::panels::PRIMITIVES.to_vec();
+        let engine: Vec<&str> = loom_asset::primitives::NAMES.to_vec();
+        assert_eq!(menu, engine, "the editor's shape list drifted from the engine's");
+        // And every one of them actually builds, so the menu cannot offer a
+        // name the builder rejects.
+        for name in menu {
+            assert!(
+                loom_asset::primitives::build(name).is_some(),
+                "`{name}` is offered but does not build"
+            );
+        }
     }
 
     /// **The hint on a missed node must be true.** It used to say `loom

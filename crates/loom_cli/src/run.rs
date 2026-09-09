@@ -3134,25 +3134,9 @@ impl App {
             crate::log::error(format!("no component type named {type_name}"));
             return;
         };
-        let properties = schema
-            .get("properties")
-            .and_then(serde_json::Value::as_object);
         let mut ops = Vec::new();
         for node in self.selected.clone() {
-            // A component whose schema declares no properties has nothing to
-            // write, and is reported below rather than silently doing nothing.
-            if let Some(properties) = properties {
-                for (field, spec) in properties {
-                    let Some(default) = spec.get("default") else {
-                        continue;
-                    };
-                    ops.push(loom_scene::SceneOp::SetField {
-                        node: node.clone(),
-                        field: format!("{type_name}.{field}"),
-                        value: default.clone(),
-                    });
-                }
-            }
+            ops.extend(component_defaults(schema.as_value(), type_name, &node));
         }
         if ops.is_empty() {
             crate::log::warn(format!("{type_name} declares no defaults to write"));
@@ -5229,6 +5213,41 @@ impl FrameHistory {
     }
 }
 
+
+/// The ops that give `node` a `type_name` with every field at its default.
+///
+/// **A null default means the field is absent, and TOML has no way to write
+/// that** — the op layer refuses it as `unrepresentable_value`, and refuses the
+/// whole transaction with it. Emitting nulls made Add Component fail outright
+/// for `Rain` (duration), `WaterBody` (extent, fetch, flow, swell),
+/// `Environment` (cloud_type) and `Joint` (limits): four types of thirty,
+/// including the two a human reaches for first. You could not add rain or water
+/// from the editor at all, and because a transaction is all-or-nothing, not one
+/// of `WaterBody`'s other twelve fields landed either.
+///
+/// A field with no `default` at all is skipped for a different reason: there is
+/// nothing to write, and guessing would author a value nobody chose.
+fn component_defaults(
+    schema: &serde_json::Value,
+    type_name: &str,
+    node: &str,
+) -> Vec<loom_scene::SceneOp> {
+    let Some(properties) = schema.get("properties").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    properties
+        .iter()
+        .filter_map(|(field, spec)| {
+            let default = spec.get("default")?;
+            (!default.is_null()).then(|| loom_scene::SceneOp::SetField {
+                node: node.to_owned(),
+                field: format!("{type_name}.{field}"),
+                value: default.clone(),
+            })
+        })
+        .collect()
+}
+
 /// `to` written relative to `from`, both absolute.
 ///
 /// **No dependency for this.** `pathdiff` is a crate; this is the shared-prefix
@@ -5312,6 +5331,54 @@ pub fn open_scene(
 
 #[cfg(test)]
 mod tests {
+
+    /// **Every type in the Add Component menu must actually add.**
+    ///
+    /// The menu is the registry, so a type that cannot be written is offered
+    /// anyway — and this failed for four of thirty, including `Rain` and
+    /// `WaterBody`. The specific defect is a `null` default reaching the op
+    /// layer, which refuses it as `unrepresentable_value` and rejects the whole
+    /// transaction with it, so nothing at all is added.
+    ///
+    /// Asserted as "no type emits an unrepresentable value" rather than "every
+    /// type applies": some components are legitimately refused on a bare node —
+    /// a `Joint` with nothing to join — and that refusal is the validator
+    /// working, not this bug.
+    #[test]
+    fn no_component_in_the_menu_emits_a_value_toml_cannot_hold() {
+        const SCENE: &str = "[scene]\nformat = 1\n\n[[node]]\nname = \"Root\"\n";
+        let registry = loom_scene::components::registry();
+
+        let mut checked = 0;
+        for type_name in registry.type_names() {
+            // Node-key sugar, not components anyone adds — the menu skips these.
+            if matches!(type_name, "Name" | "Transform") {
+                continue;
+            }
+            let Some(schema) = registry.describe(type_name) else {
+                continue;
+            };
+            let ops = super::component_defaults(schema.as_value(), type_name, "Root");
+            if ops.is_empty() {
+                continue;
+            }
+            checked += 1;
+            let transaction = loom_scene::Transaction {
+                label: format!("Add {type_name}"),
+                ops,
+                dry_run: true,
+                expect_version: None,
+            };
+            if let Err(e) = loom_scene::apply(SCENE, &transaction) {
+                assert_ne!(
+                    e.error, "unrepresentable_value",
+                    "Add Component on `{type_name}` writes something TOML cannot hold: {}",
+                    e.constraint
+                );
+            }
+        }
+        assert!(checked > 20, "only {checked} types were exercised");
+    }
 
     /// **The root is found, not configured** — ADR 0104. The failure this
     /// guards is the quiet one: a root that resolves to the wrong directory

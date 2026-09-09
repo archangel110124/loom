@@ -957,6 +957,27 @@ fn apply_one(doc: &mut DocumentMut, op: &SceneOp) -> Result<(), OpFailure> {
             // comment and the indentation with it. Preserving human annotation
             // is the entire reason this layer edits a format-preserving DOM
             // instead of re-emitting the file.
+            // **A nested object written over a header sub-table updates its
+            // keys in place.** `[node.components.WaterBody.swell]` carries the
+            // eight lines of comment that explain why its numbers are what they
+            // are; replacing the item with `swell = { .. }` deleted all of it
+            // and reformatted the rest. Preserving human annotation is the
+            // entire reason this layer edits a DOM instead of re-emitting the
+            // file, and the inspector's nested-object editor writes whole
+            // objects — so without this, touching one number in a swell threw
+            // away the paragraph above it.
+            //
+            // An *inline* table (`swell = { .. }`) is one value on one line and
+            // is replaced as a value, which keeps that line's own decor. Only
+            // the header form needs the walk.
+            if let Some(fields) = new.as_object()
+                && component.get(field_name).is_some_and(|item| !item.is_value())
+                && let Some(existing) = component
+                    .get_mut(field_name)
+                    .and_then(Item::as_table_like_mut)
+            {
+                return merge_table(existing, fields, field);
+            }
             let value = json_to_toml(new, field)?;
             // Whether the thing being replaced was written in header form
             // (`[node.components.X.field]` or `[[...]]`). Such a key carries no
@@ -1355,6 +1376,54 @@ fn find_node(doc: &DocumentMut, path: &str) -> Option<usize> {
             None => name == path,
         }
     })
+}
+
+
+/// Write `fields` into an existing header sub-table, keeping its decor.
+///
+/// **Update, do not replace.** Every key the object names is assigned through
+/// the entry that is already there, so the key's own comment and indentation
+/// survive; keys the object does not name are removed, so this still *means*
+/// "set this table to this object" rather than "merge into it". A nested object
+/// under a nested header recurses for the same reason one level up did.
+fn merge_table(
+    table: &mut dyn toml_edit::TableLike,
+    fields: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<(), (String, String, String, Option<String>)> {
+    let stale: Vec<String> = table
+        .iter()
+        .map(|(key, _)| key.to_owned())
+        .filter(|key| !fields.contains_key(key))
+        .collect();
+    for key in stale {
+        table.remove(&key);
+    }
+    for (key, value) in fields {
+        if let Some(nested) = value.as_object()
+            && table.get(key).is_some_and(|item| !item.is_value())
+            && let Some(inner) = table.get_mut(key).and_then(Item::as_table_like_mut)
+        {
+            merge_table(inner, nested, field)?;
+            continue;
+        }
+        let toml = json_to_toml(value, field)?;
+        match table.get_mut(key) {
+            // The same decor carry the scalar path does, and for the same
+            // reason: a trailing comment lives in the value's own suffix.
+            Some(existing) => {
+                let carried = existing.as_value().map(|v| v.decor().clone());
+                *existing = Item::Value(toml);
+                if let (Some(decor), Some(v)) = (carried, existing.as_value_mut()) {
+                    *v.decor_mut() = decor;
+                }
+            }
+            None => {
+                table.insert(key, Item::Value(toml));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A JSON value as TOML, or a refusal.
@@ -1877,6 +1946,103 @@ prefab = \"rock\"
         .expect_err("must be refused");
 
         assert_eq!(err.error, "would_create_a_cycle");
+    }
+
+    /// **A nested object is updated in place, comments and all.**
+    ///
+    /// The inspector's nested-object editor writes the whole object — one number
+    /// changed means `WaterBody.swell` is set to `{direction, fetch, u10}`. Done
+    /// by replacing the item, that turned a `[node.components.WaterBody.swell]`
+    /// header and the eight lines of comment above it into a one-line inline
+    /// table, which is precisely the reformatting this layer edits a DOM to
+    /// prevent. So a header sub-table is walked rather than replaced.
+    #[test]
+    fn writing_a_nested_object_keeps_the_table_and_its_comments() {
+        const WITH_SWELL: &str = r#"
+[scene]
+format = 1
+
+[[node]]
+name = "Sea"
+
+  [node.components.WaterBody]
+  density = 1025.0
+  wave_model = "spectrum"
+
+    # The other 420 km, arrived from 60 degrees to starboard.
+    [node.components.WaterBody.swell]
+    u10 = 18.0
+    fetch = 420000.0
+    direction = [0.0, 1.0]
+"#;
+
+        let applied = apply(
+            WITH_SWELL,
+            &tx(
+                "Blow harder",
+                vec![SceneOp::SetField {
+                    node: "Sea".into(),
+                    field: "WaterBody.swell".into(),
+                    value: serde_json::json!({
+                        "u10": 24.0, "fetch": 420_000.0, "direction": [0.0, 1.0],
+                    }),
+                }],
+            ),
+        )
+        .expect("applied");
+
+        assert!(
+            applied.scene.contains("# The other 420 km"),
+            "the author's comment was thrown away:\n{}",
+            applied.scene
+        );
+        assert!(
+            applied.scene.contains("[node.components.WaterBody.swell]"),
+            "the sub-table collapsed to an inline table:\n{}",
+            applied.scene
+        );
+        assert!(applied.scene.contains("u10 = 24.0"), "the value did not change");
+        assert!(!applied.scene.contains("u10 = 18.0"));
+        // One line differs, not the whole block.
+        let touched = applied.diff.iter().filter(|l| l.starts_with('+')).count();
+        assert_eq!(touched, 1, "more than the changed key was rewritten: {:?}", applied.diff);
+    }
+
+    /// **Setting a table to an object means exactly that**: a key the object
+    /// does not name is gone, not merged around. Otherwise "set" would quietly
+    /// be "update", and a field could never be cleared.
+    #[test]
+    fn a_key_absent_from_the_object_is_removed_from_the_table() {
+        const WITH_OPTICS: &str = r#"
+[scene]
+format = 1
+
+[[node]]
+name = "Sea"
+
+  [node.components.WaterBody]
+  density = 1025.0
+
+    [node.components.WaterBody.optics]
+    attenuation = [0.34, 0.06, 0.01]
+    backscatter = [0.0004, 0.0008, 0.0018]
+"#;
+
+        let applied = apply(
+            WITH_OPTICS,
+            &tx(
+                "Attenuation only",
+                vec![SceneOp::SetField {
+                    node: "Sea".into(),
+                    field: "WaterBody.optics".into(),
+                    value: serde_json::json!({ "attenuation": [0.34, 0.06, 0.01] }),
+                }],
+            ),
+        )
+        .expect("applied");
+
+        assert!(!applied.scene.contains("backscatter"), "{}", applied.scene);
+        assert!(applied.scene.contains("attenuation"));
     }
 
     #[test]

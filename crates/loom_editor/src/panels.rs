@@ -340,6 +340,13 @@ pub struct AgentMark {
 /// Named here rather than imported because `loom_editor` depends on
 /// `loom_scene`, `loom_reflect` and `loom_render` only — reaching into
 /// `loom_asset` for five strings would buy a crate edge for nothing.
+/// The shapes the Create menu offers.
+///
+/// **A copy of `loom_asset::primitives::NAMES`, and a test in `loom_cli` holds
+/// the two together.** This crate does not depend on `loom_asset` and acquiring
+/// an edge to share five strings would cost more than it saves — but a sixth
+/// primitive added to the engine and not to this list is a shape the editor
+/// cannot make, silently, so the drift is asserted rather than hoped for.
 pub const PRIMITIVES: &[&str] = &["box", "plane", "sphere", "cylinder", "capsule"];
 
 const AXIS_COLORS: [egui::Color32; 3] = [
@@ -1003,7 +1010,10 @@ pub(crate) fn inspector(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
                 // another meant reading five numbers off one and typing them
                 // into the next, which is how two things that should be the
                 // same drift apart.
-                if ui.small_button("⧉").on_hover_text("copy these values").clicked() {
+                // The word, not a glyph: `⧉` is not in the bundled font and
+                // rendered as a tofu box — a button whose icon is a missing
+                // character is a button nobody presses.
+                if ui.small_button("copy").on_hover_text("copy these values").clicked() {
                     actions.push(UiAction::CopyComponent(path.clone(), type_name.clone()));
                 }
                 if state.copied_component == Some(type_name.as_str())
@@ -2605,6 +2615,37 @@ fn draw_field(
         // `WaterBody.waves`, `Buoyancy.pontoons`, `Scatter.excludes` and a
         // voxel recipe were all a single unreadable line that could only be
         // edited in a text editor.
+        // **A nested object is edited, not printed.** `WaterBody.swell` — the
+        // three numbers that *are* the FFT sea — reached the inspector as the
+        // literal text `{"direction":[0.25881904,0.9659258],"fetch":420000.0,
+        // "u10":18.0}` and could not be changed. So could `optics`, `flow` and
+        // `waves`. The one thing this editor exists to do is change a value,
+        // and for a whole class of fields it could only describe one.
+        //
+        // The whole object is written back on any change rather than a dotted
+        // sub-path: `SetField` splits its field name once and treats the
+        // remainder as a literal TOML key, so `WaterBody.swell.u10` would write
+        // a key spelled `swell.u10` instead of reaching into the table.
+        serde_json::Value::Object(map) if !map.is_empty() => {
+            if let Some(edited) = object_fields(ui, current, editable, schema, key) {
+                actions.push(set(edited));
+            }
+        }
+
+        // **Absent, said plainly.** `null` used to fall through to the summary,
+        // which printed the word `null` in the same weak grey a real value uses.
+        serde_json::Value::Null => {
+            ui.add(
+                egui::Label::new(egui::RichText::new("not set").weak().italics())
+                    .wrap(),
+            )
+            .on_hover_text(
+                "an optional field with no value — the CLI or the agent can \
+                 author one, and copying the component from another node \
+                 brings it across",
+            );
+        }
+
         serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_object) => {
             array_of_objects(ui, path, key, items, schema, editable, actions);
         }
@@ -2635,14 +2676,37 @@ fn object_fields(
     ui: &mut egui::Ui,
     item: &serde_json::Value,
     editable: bool,
+    schema: Option<&serde_json::Value>,
+    salt: &str,
 ) -> Option<serde_json::Value> {
     let object = item.as_object()?;
     let mut edited = object.clone();
     let mut changed = false;
 
-    egui::Grid::new("entry").num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {
+    // **Salted, because a component may carry two of these.** A `WaterBody` has
+    // `swell` and `optics` side by side, and two grids under one id is the
+    // duplicate-id error egui draws as red text across the panel.
+    egui::Grid::new(("entry", salt)).num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {
+        // The sub-schema, so a nested number gets the same range and the same
+        // tooltip it would get at the top level. Without it every nested field
+        // is an unbounded drag and the human is guessing at units.
+        let properties = schema
+            .and_then(|s| s.get("properties"))
+            .and_then(serde_json::Value::as_object);
         for (key, value) in object {
-            ui.label(egui::RichText::new(key).monospace().small());
+            let spec = properties.and_then(|p| p.get(key));
+            let doc = spec
+                .and_then(|f| f.get("description"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let bounds = (
+                spec.and_then(|f| f.get("minimum")).and_then(serde_json::Value::as_f64),
+                spec.and_then(|f| f.get("maximum")).and_then(serde_json::Value::as_f64),
+            );
+            let label = ui.label(egui::RichText::new(key).monospace().small());
+            if !doc.is_empty() {
+                label.on_hover_text(doc);
+            }
             match value {
                 serde_json::Value::Bool(b) => {
                     let mut on = *b;
@@ -2653,9 +2717,13 @@ fn object_fields(
                 }
                 serde_json::Value::Number(n) => {
                     let mut v = n.as_f64().unwrap_or_default();
-                    if ui
-                        .add_enabled(editable, egui::DragValue::new(&mut v).speed(0.01))
-                        .changed()
+                    let widget = match bounds {
+                        (Some(lo), Some(hi)) => {
+                            egui::DragValue::new(&mut v).range(lo..=hi).speed(0.01)
+                        }
+                        _ => egui::DragValue::new(&mut v).speed(0.01),
+                    };
+                    if ui.add_enabled(editable, widget).changed()
                         && let Some(number) = serde_json::Number::from_f64(v)
                     {
                         edited.insert(key.clone(), serde_json::Value::Number(number));
@@ -2829,7 +2897,12 @@ fn array_of_objects(
             egui::CollapsingHeader::new(egui::RichText::new("fields").weak().small())
                 .id_salt((path, key, index))
                 .show(ui, |ui| {
-                    if let Some(updated) = object_fields(ui, item, editable) {
+                    // The entry schema, so a stage's fields carry their
+                    // ranges too. `items` is where an array's element schema
+                    // lives; `field_schema` has already followed any `$ref`.
+                    let entry = schema.and_then(|s| s.get("items"));
+                    let salt = format!("{key}[{index}]");
+                    if let Some(updated) = object_fields(ui, item, editable, entry, &salt) {
                         // One element, replaced in place — the array around it
                         // keeps its comments and its order.
                         actions.push(UiAction::Splice(
