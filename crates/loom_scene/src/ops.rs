@@ -66,8 +66,11 @@ pub enum SceneOp {
     ///
     /// **One op rather than three named ones** (append / remove / replace),
     /// because all three are this with different arguments, and because the
-    /// callers that need it — the sculpt brush, `WaterBody.waves`,
-    /// `Buoyancy.pontoons`, `Scatter.excludes`, the paint stroke lists —
+    /// callers that need it — the sculpt brush, `Buoyancy.pontoons`,
+    /// `Scatter.exclude`, `Environment.stages`, the paint stroke lists —
+    /// (**not** `WaterBody.waves`, which this said for a long time and which is
+    /// a `WaveSet` *object*: its array is one level further down, and a field
+    /// name splits once, so this op cannot address it) —
     /// otherwise each pick a different one and the inspector has to know which.
     ///
     /// **The spelling on disk is preserved.** `[[node.components.X.ops]]` stays

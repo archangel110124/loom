@@ -3199,12 +3199,27 @@ fn array_of_objects(
             {
                 object.insert("at".to_owned(), serde_json::Value::Number(number));
             }
+            // **A mood ladder starts with two rungs, because one is refused.**
+            // `check_moods` says "at least two stages, or none" — a ladder with
+            // a single rung is a constant, and the format would rather say that
+            // by having no stages at all. So the first click could never
+            // succeed: it inserted exactly one and the transaction was rejected
+            // every time, on every scene. The pair is the whole axis, 0 and 1,
+            // which is also what somebody adding their first stages means.
+            let mut entries = vec![blank.clone()];
+            if items.is_empty()
+                && at.is_some()
+                && let Some(object) = blank.as_object_mut()
+            {
+                object.insert("at".to_owned(), serde_json::json!(1.0));
+                entries.push(blank);
+            }
             actions.push(UiAction::Splice(
                 path.to_owned(),
                 key.to_owned(),
                 at.map_or(items.len(), |(index, _)| index),
                 0,
-                vec![blank],
+                entries,
             ));
         }
     });

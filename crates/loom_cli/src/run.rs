@@ -2633,19 +2633,49 @@ impl App {
             UiAction::Select { path, extend } => self.select(&path, extend),
             UiAction::SetField(node, field, value) => self.set_field(&node, &field, value),
             UiAction::Splice(node, field, index, remove, insert) => {
+                // **An array that is not on disk has to be created first.**
+                // `SpliceArray` refuses a field the node does not carry — its
+                // own hint says "set the field first" — and the editor never
+                // did, so "+ add" on any array the author had not already
+                // written was a button that could only fail. Showing every
+                // field of a component, written or not, is what made that the
+                // *normal* case rather than a corner.
+                //
+                // Decided here rather than in the panel because this is where
+                // the scene is: the panel would have to guess whether the empty
+                // array it was handed came from the file or from the schema,
+                // and guessing is how the last three defects happened. One
+                // transaction, so it is still one Ctrl+Z.
+                let mut ops = Vec::new();
+                let written = self
+                    .view
+                    .scene
+                    .nodes()
+                    .iter()
+                    .find(|n| n.path == node)
+                    .and_then(|n| {
+                        let (component, key) = field.split_once('.')?;
+                        n.components.get(component)?.get(key)
+                    })
+                    .is_some();
+                if !written {
+                    ops.push(loom_scene::SceneOp::SetField {
+                        node: node.clone(),
+                        field: field.clone(),
+                        value: serde_json::Value::Array(Vec::new()),
+                    });
+                }
                 // **Not coalesced into a gesture.** A drag on a slider is one
                 // continuous act and undoes as one; adding and removing entries
                 // are separate decisions and each earns its own undo step.
-                self.transact(
-                    format!("Splice {node} {field}"),
-                    vec![loom_scene::SceneOp::SpliceArray {
-                        node,
-                        field,
-                        index,
-                        remove,
-                        insert,
-                    }],
-                );
+                ops.push(loom_scene::SceneOp::SpliceArray {
+                    node: node.clone(),
+                    field: field.clone(),
+                    index,
+                    remove,
+                    insert,
+                });
+                self.transact(format!("Splice {node} {field}"), ops);
             }
             UiAction::RevertOverride(node, field) => {
                 let keys = if field.is_empty() { Vec::new() } else { vec![field.clone()] };

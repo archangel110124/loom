@@ -600,6 +600,39 @@ fn describe_all() -> (u8, String) {
     )
 }
 
+/// The op list, schema-checked — the one check `Scene::parse` cannot do.
+///
+/// **Extracted because it is not only `validate`'s.** A `VoxelVolume`'s ops ride
+/// on the component as free-form JSON (`Vec<serde_json::Value>`), because the op
+/// vocabulary lives in `loom_voxel` and `loom_scene` may not depend on it
+/// (BUILD-BRIEF §3). So the op layer's own post-apply check — `Scene::parse` —
+/// cannot see inside them, and `loom scene --tx` could write a scene that
+/// `loom validate` then refuses. The renderer degrades rather than crashing
+/// (design doc §2.6), so the result was a level whose terrain silently
+/// disappeared with every command reporting success.
+///
+/// This crate can see both sides of that boundary, so this is where the two
+/// validators are made to agree.
+fn voxel_op_errors(scene: &loom_scene::Scene) -> Vec<serde_json::Value> {
+    scene
+        .nodes()
+        .iter()
+        .filter_map(|node| {
+            let e = parse_ops(node.components.get("VoxelVolume")?).err()?;
+            Some(serde_json::json!({
+                "error": "invalid_voxel_op",
+                "node": node.path,
+                "field": "VoxelVolume.ops",
+                "constraint": e,
+                "hint": "`kind` is one of sphere, box, capsule, heightfield, terrain, \
+                         each with its own fields. The volume is refused whole rather \
+                         than baked without this op: a volume short one op still \
+                         renders, which is why this cannot be a warning.",
+            }))
+        })
+        .collect()
+}
+
 fn validate(path: &str) -> (u8, String) {
     let src = match loom_asset::pack::read_text(std::path::Path::new(path)) {
         Ok(s) => s,
@@ -649,23 +682,7 @@ fn validate(path: &str) -> (u8, String) {
             // drop it silently. No volume is baked here — though a `terrain`
             // op's recipe is, which is what makes `validate` catch a missing
             // or mis-scaled recipe rather than leaving it to a render.
-            let voxel_errors: Vec<serde_json::Value> = scene
-                .nodes()
-                .iter()
-                .filter_map(|node| {
-                    let e = parse_ops(node.components.get("VoxelVolume")?).err()?;
-                    Some(serde_json::json!({
-                        "error": "invalid_voxel_op",
-                        "node": node.path,
-                        "field": "VoxelVolume.ops",
-                        "constraint": e,
-                        "hint": "`kind` is one of sphere, box, capsule, heightfield, terrain, \
-                                 each with its own fields. The volume is refused whole rather \
-                                 than baked without this op: a volume short one op still \
-                                 renders, which is why this cannot be a warning.",
-                    }))
-                })
-                .collect();
+            let voxel_errors = voxel_op_errors(&scene);
             if !voxel_errors.is_empty() {
                 return (1, json_line(&serde_json::json!({ "errors": voxel_errors })));
             }
@@ -5069,6 +5086,46 @@ fn scene_tx(path: &str, args: &[String]) -> (u8, String) {
         transaction.dry_run = true;
     }
 
+    // **A write that `loom validate` would refuse is refused here.** The op
+    // layer re-parses with `Scene::parse`, which cannot see inside a
+    // `VoxelVolume`'s free-form op list — so `ops = [{ at = 0.0 }]` applied
+    // cleanly, `loom validate` then failed with `missing field 'kind'`, and the
+    // render dropped the terrain while reporting success. An agent writing
+    // through this command could strip a level's ground with every step saying
+    // ok.
+    //
+    // Only when the transaction touches a `VoxelVolume`: this costs a second
+    // apply, and a gizmo drag firing every frame must not pay for it.
+    let touches_voxels = transaction.ops.iter().any(|op| {
+        matches!(op, loom_scene::SceneOp::SetField { field, .. }
+            | loom_scene::SceneOp::SpliceArray { field, .. }
+            if field.starts_with("VoxelVolume."))
+    });
+    if touches_voxels && !transaction.dry_run {
+        let mut rehearsal = transaction.clone();
+        rehearsal.dry_run = true;
+        match loom_scene::apply_to_file(std::path::Path::new(path), &rehearsal) {
+            Ok(applied) => {
+                if let Ok(scene) = loom_scene::Scene::parse(&applied.scene) {
+                    let errors = voxel_op_errors(&scene);
+                    if !errors.is_empty() {
+                        return (
+                            1,
+                            json_line(&serde_json::json!({
+                                "error": "would_produce_invalid_scene",
+                                "label": transaction.label,
+                                "errors": errors,
+                                "hint": "The transaction was rejected whole; the scene is \
+                                         unchanged. `loom validate` checks the same thing.",
+                            })),
+                        );
+                    }
+                }
+            }
+            Err(e) => return file_apply_error(path, &e),
+        }
+    }
+
     // --dry-run prints the diff and touches nothing. This is how the human
     // reviews a large change before it lands. `apply_to_file` honours it and
     // holds the scene lock across read-apply-write, so the version check is
@@ -9022,6 +9079,83 @@ transform = { pos = [0.0, 3.0, 0.0], scale = [0.5, 0.5, 0.5] }
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["error"], "unknown_flag");
         assert_eq!(v["value"], "--frame");
+    }
+
+    /// **A transaction must not write what `loom validate` refuses.**
+    ///
+    /// A `VoxelVolume`'s ops are free-form JSON — the vocabulary lives in
+    /// `loom_voxel`, which `loom_scene` may not depend on — so the op layer's
+    /// own post-apply `Scene::parse` cannot see inside them. `ops = [{ at = 0.0
+    /// }]` applied cleanly, `loom validate` then failed with `missing field
+    /// 'kind'`, and the render dropped the terrain while reporting success: an
+    /// agent could strip a level's ground with every step saying ok.
+    #[test]
+    fn a_transaction_that_would_not_validate_is_refused() {
+        let dir = std::env::temp_dir().join("loom-voxel-tx-gate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let scene = dir.join("scene.loom");
+        let before = "[scene]\nformat = 1\n\n[[node]]\nname = \"Root\"\n\n  \
+                      [node.components.VoxelVolume]\n  voxel_size = 0.25\n  ops = []\n";
+        std::fs::write(&scene, before).expect("scene");
+        let tx = dir.join("tx.json");
+        std::fs::write(
+            &tx,
+            r#"{"label":"bad op","ops":[{"op":"splice_array","node":"Root",
+                "field":"VoxelVolume.ops","index":0,"remove":0,"insert":[{"at":0.0}]}]}"#,
+        )
+        .expect("tx");
+
+        let (code, out) = run(&args(&[
+            "scene",
+            &scene.to_string_lossy(),
+            "--tx",
+            &tx.to_string_lossy(),
+        ]));
+
+        assert_eq!(code, 1, "an unloadable result is exit 1: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["error"], "would_produce_invalid_scene");
+        assert_eq!(v["errors"][0]["error"], "invalid_voxel_op");
+        assert_eq!(
+            std::fs::read_to_string(&scene).unwrap(),
+            before,
+            "the scene must be untouched when the transaction is refused"
+        );
+    }
+
+    /// And a well-formed op still applies — the gate must refuse the broken
+    /// case only, not voxel authoring in general.
+    #[test]
+    fn a_well_formed_voxel_op_still_applies() {
+        let dir = std::env::temp_dir().join("loom-voxel-tx-gate-ok");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let scene = dir.join("scene.loom");
+        std::fs::write(
+            &scene,
+            "[scene]\nformat = 1\n\n[[node]]\nname = \"Root\"\n\n  \
+             [node.components.VoxelVolume]\n  voxel_size = 0.25\n  ops = []\n",
+        )
+        .expect("scene");
+        let tx = dir.join("tx.json");
+        std::fs::write(
+            &tx,
+            r#"{"label":"a sphere","ops":[{"op":"splice_array","node":"Root",
+                "field":"VoxelVolume.ops","index":0,"remove":0,
+                "insert":[{"kind":"sphere","center":[0.0,0.0,0.0],"radius":2.0,"mode":"union"}]}]}"#,
+        )
+        .expect("tx");
+
+        let (code, out) = run(&args(&[
+            "scene",
+            &scene.to_string_lossy(),
+            "--tx",
+            &tx.to_string_lossy(),
+        ]));
+
+        assert_eq!(code, 0, "{out}");
+        assert!(std::fs::read_to_string(&scene).unwrap().contains("sphere"));
     }
 
     /// **A proposal that cannot apply is refused where the agent is, not where

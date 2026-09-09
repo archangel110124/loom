@@ -255,3 +255,63 @@ Still open, honestly: the per-wave Gerstner list. `WaterBody.waves.waves` is an
 object-array one level below a nested object, where `object_fields` edits only
 scalars — and `SetField` splits its field name once, so it cannot address that
 path either. Authoring individual Gerstner waves is `loom scene --tx` work.
+
+## Fourth addendum — 2026-09-09
+
+7.5/10. The critic verified the glTF maths independently, with its own fixture
+carrying a rotation *and* a non-uniform scale, and confirmed the cofactor
+normal transform is exactly right where the naive one would be wrong. It then
+found that **the button this ADR has been about for three rounds still did not
+work**, and that the third addendum said it did.
+
+**Retraction.** The third addendum claimed: *"Measured across every
+object-array in the engine: `Buoyancy.pontoons` and `Scatter.exclude` accept
+`{}`, `Environment.stages` takes its `at`."* That measurement was taken by
+splicing into an array **that was already on disk**. From either state the
+editor can actually reach, it is false:
+
+- **The array is usually not written at all.** `SpliceArray` refuses a field the
+  node does not carry — its own hint reads *"Splicing needs the array to exist;
+  set the field first"* — and the editor never did. Showing every field of a
+  component, written or not (first addendum), is exactly what made that the
+  normal case rather than a corner. So "+ add" on an unwritten array was a
+  button that could only fail.
+- **And one mood stage is refused by design.** `check_moods` says *"at least two
+  stages, or none"* — a ladder with one rung is a constant, and the format
+  would rather say that by having no stages. "+ add" inserted exactly one, so
+  the first stage could never be added from the editor even when
+  `stages = []` was authored.
+
+Both fixed. The splice handler prepends `SetField(field, [])` when the array is
+not in the file — decided in `run.rs`, where the scene is, rather than in the
+panel, which would have to guess whether the empty array it was handed came
+from disk or from the schema. Guessing is how the last three defects happened.
+One transaction, so still one Ctrl+Z. And the first click on an empty
+at-sorted array inserts **two** rungs, 0 and 1 — the whole axis, which is both
+what the validator requires and what somebody adding their first stages means.
+
+**The op layer no longer writes what `loom validate` refuses.** `loom scene
+--tx` now rehearses a transaction that touches a `VoxelVolume` and checks the
+result with the same op-list check `validate` runs, refusing before anything
+reaches disk. This is the honest place for it: the vocabulary lives in
+`loom_voxel`, `loom_scene` may not depend on it (BUILD-BRIEF §3), and `loom_cli`
+is the one crate that can see both sides. Only for transactions that touch a
+volume — a gizmo drag fires every frame and must not pay for a second apply.
+
+Without it the failure was silent twice over: the write succeeded, and the
+renderer degrades rather than crashing (design doc §2.6), so a level's terrain
+disappeared with every command reporting ok.
+
+**One more surviving doc lie**, one file from where the last round fixed its
+twin: `SceneOp::SpliceArray`'s own doc listed `WaterBody.waves` among its
+callers — it is a `WaveSet` object this op cannot address — and called
+`Scatter.exclude` "excludes".
+
+**And one reported defect that was not one.** The critic read
+`WaterBody.extent`'s refusal as giving no cause. Checked: setting it on a
+deterministic body returns `constraint: "extent only on simulation =
+\"cinematic\""`, which names the field, the rule and the fix. The vague
+`"a readable WaterBody"` string it saw belongs to a different path — a
+component that fails to deserialise at all — and that one carries the serde
+error in its hint. Reported here because a finding checked and dismissed is
+worth as much as one acted on.
