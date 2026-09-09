@@ -2613,6 +2613,9 @@ pub struct Runner {
     /// The game's rules, if the scene has any, and the state they keep.
     rules: Option<String>,
     state: loom_script::GameState,
+    /// The on-screen button held on the previous tick — ADR 0111. Part of the
+    /// run, so a save that restores mid-hold does not raise a second press.
+    ui_was: u8,
     /// The mood ladder, parsed once, **only when some rung ramps the wind**.
     ///
     /// Empty for every scene that does not — which is every scene written
@@ -2781,6 +2784,7 @@ impl Runner {
             character_scripts,
             node_scripts,
             rules,
+            ui_was: 0,
             state: loom_script::GameState::default(),
             // Parsed only when a rung actually ramps the wind, so this stays
             // empty — and the per-tick weather stays one `is_empty` — for
@@ -2994,6 +2998,7 @@ impl Runner {
             character_scripts: std::collections::BTreeMap::new(),
             node_scripts: Vec::new(),
             rules: None,
+            ui_was: 0,
             state: loom_script::GameState::default(),
             weather_stages: Vec::new(),
             pending_blasts: Vec::new(),
@@ -3012,6 +3017,33 @@ impl Runner {
     /// # Errors
     /// [`loom_script::ScriptError`] from whichever script failed.
     pub fn tick(&mut self, world: &mut World, tick: u64) -> Result<(), loom_script::ScriptError> {
+        // **A press becomes an ordinary event** — ADR 0111. It arrives as the
+        // number that travelled on the wire and leaves as the button's node
+        // path, resolved through the scene both peers share; a rules script
+        // matches `e.kind == "ui"` against `e.node` and never sees an index.
+        //
+        // Before the step, so a script that starts a game on a press has the
+        // same tick to act in that a key press would give it.
+        // **The edge is taken here, not by the caller.** `Intent.ui` is a level —
+        // which button the player is holding — because that is what a fixed
+        // frame can carry and what a lockstep peer replays. Left as a level, a
+        // finger resting on START pressed it sixty times a second; measured, a
+        // fifteen-tick hold raised sixteen events. Doing it in the runner means
+        // the window, `loom sim --hold` and a remote peer all get one press from
+        // one press, rather than three callers each remembering to.
+        let pressed = self.input.ui != 0 && self.input.ui != self.ui_was;
+        self.ui_was = self.input.ui;
+        if pressed
+            && let Some(path) = crate::hud::button_path(world, self.input.ui)
+        {
+            self.events.push(loom_script::Event {
+                tick,
+                kind: "ui".to_owned(),
+                at: [0.0; 3],
+                node: path,
+                values: std::collections::BTreeMap::new(),
+            });
+        }
         // **The weather, before the step it acts on.** The rules wrote `dread`
         // at the end of the last tick, so the sea this step is solved against
         // is one tick behind the scalar — deterministic, and irrelevant
@@ -3197,6 +3229,16 @@ pub struct PlayerInput {
     /// The inventory key (Tab). Level here, edge there, exactly as `interact`
     /// is — a held Tab must open the creel once, not sixty times a second.
     pub bag: bool,
+    /// Which on-screen button is being pressed — ADR 0111.
+    ///
+    /// The 1-based index of a `Hud` button among the scene's, in world order;
+    /// zero for none. **A number here and a node path in the script**, resolved
+    /// through the scene both lockstep peers share, because `loom_net`'s
+    /// `Intent` is a fixed-width frame and a name is not.
+    ///
+    /// Level here, edge there, exactly as `interact` is: a held mouse button
+    /// must press a menu item once rather than sixty times a second.
+    pub ui: u8,
 }
 
 /// Play mode as the editor holds it: a scene's world, its simulation, and how
@@ -3249,6 +3291,11 @@ pub struct Play {
     /// time, and one flag would swallow whichever arrived second.
     bag_pending: bool,
     bag_was_down: bool,
+    /// The on-screen button waiting to be consumed by a tick — ADR 0111.
+    /// Latched like the others: a click lasts one frame and the tick that
+    /// consumes it may not have run yet.
+    ui_pending: u8,
+    ui_was: u8,
     /// The character a human drives, and the node the view comes from.
     /// Resolved once at Play: neither can appear mid-run.
     player: Option<loom_ecs::Entity>,
@@ -3620,6 +3667,8 @@ impl Play {
             interact_pending: false,
             interact_was_down: false,
             bag_pending: false,
+            ui_pending: 0,
+            ui_was: 0,
             bag_was_down: false,
         }
     }
@@ -3635,6 +3684,12 @@ impl Play {
         self.interact_was_down = input.interact;
         self.bag_pending |= input.bag && !self.bag_was_down;
         self.bag_was_down = input.bag;
+        // A press, not a hold — ADR 0111. `ui_was` carries the last level so a
+        // finger resting on a menu item fires it once.
+        if input.ui != 0 && input.ui != self.ui_was {
+            self.ui_pending = input.ui;
+        }
+        self.ui_was = input.ui;
         self.input = input;
     }
 
@@ -3910,6 +3965,10 @@ impl Play {
                 fire: std::mem::take(&mut self.fire_pending),
                 interact: std::mem::take(&mut self.interact_pending),
                 bag: std::mem::take(&mut self.bag_pending),
+                // Consumed here like the rest — ADR 0111. A click lands in a
+                // frame and the tick that takes it may not have run yet, so it
+                // is latched by `set_input` and released exactly once.
+                ui: std::mem::take(&mut self.ui_pending),
                 sprint: self.input.sprint,
                 ..loom_script::Motion::default()
             };
@@ -4605,6 +4664,11 @@ transform = { pos = [0.0, 4.0, 0.0], rot_euler = [0.0, 0.0, 45.0], scale = [0.7,
                 right: [1.0, 0.0, 0.0],
                 aim: [0.0, 0.0, 1.0],
                 buttons: 0,
+                // A menu press now rides the same frame, and varies per peer
+                // and per tick like everything else here — a constant would
+                // pass even if the byte were being dropped.
+                #[allow(clippy::cast_possible_truncation)]
+                ui: ((tick + u64::from(peer)) % 4) as u8,
             }
             .with_buttons(tick % 37 == u64::from(peer), false, tick.is_multiple_of(53), false)
         };

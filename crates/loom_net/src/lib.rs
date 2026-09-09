@@ -62,11 +62,26 @@ pub struct Intent {
     pub aim: [f32; 3],
     /// jump | sprint | fire | interact, one bit each.
     pub buttons: u8,
+    /// Which on-screen button was pressed this tick — ADR 0111.
+    ///
+    /// **A number, not a name, and that is the whole design.** A press has to
+    /// travel as intent like every other thing a human did with their hands, and
+    /// `Intent` is a fixed-width frame — 45 bytes before this — because a
+    /// variable one is a length prefix, an allocation and a parser on the hot
+    /// path of a lockstep tick. So the wire carries the **1-based index of the
+    /// button among the scene's `Hud` button elements, in world order**, and
+    /// zero for none.
+    ///
+    /// Well defined precisely because lockstep peers run the same scene: both
+    /// resolve the index to the same node path, and a script sees a path rather
+    /// than a number. 255 buttons is more than any HUD has, and the engine has
+    /// no opinion about what they mean.
+    pub ui: u8,
 }
 
 impl Intent {
-    /// Bytes on the wire. Fixed width, little-endian, 45 bytes.
-    const WIDTH: usize = 4 * 11 + 1;
+    /// Bytes on the wire. Fixed width, little-endian, 46 bytes.
+    const WIDTH: usize = 4 * 11 + 2;
 
     fn encode(&self, out: &mut Vec<u8>) {
         for value in self
@@ -79,6 +94,7 @@ impl Intent {
             out.extend_from_slice(&value.to_le_bytes());
         }
         out.push(self.buttons);
+        out.push(self.ui);
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
@@ -94,7 +110,8 @@ impl Intent {
             forward: [floats[2], floats[3], floats[4]],
             right: [floats[5], floats[6], floats[7]],
             aim: [floats[8], floats[9], floats[10]],
-            buttons: bytes[Self::WIDTH - 1],
+            buttons: bytes[Self::WIDTH - 2],
+            ui: bytes[Self::WIDTH - 1],
         })
     }
 
@@ -609,6 +626,10 @@ mod tests {
             right: [1.0, 0.0, 0.0],
             aim: [0.1, -0.9, 0.42],
             buttons: 0,
+            // A pressed on-screen button rides the same frame — ADR 0111. Not
+            // zero, so a decoder that forgot the byte fails here rather than in
+            // a game where one player's menu click never reached the other.
+            ui: 7,
         }
         .with_buttons(true, false, true, false);
 

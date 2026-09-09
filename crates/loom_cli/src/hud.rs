@@ -38,6 +38,10 @@ pub(crate) struct Element {
     fill: f32,
     /// A panel's fill alpha and a bar's track alpha.
     opacity: f32,
+    /// For a button, its 1-based place among the scene's buttons in world order
+    /// — the number that travels on the wire (ADR 0111). Zero for everything
+    /// else, and also the egui id, so two buttons cannot share one.
+    index: u8,
 }
 
 #[cfg(test)]
@@ -55,6 +59,7 @@ impl Default for Element {
             extent: egui::vec2(180.0, 14.0),
             fill: 1.0,
             opacity: 0.55,
+            index: 0,
         }
     }
 }
@@ -100,7 +105,7 @@ pub(crate) fn elements(
             (playing || !flagged(component, "only_in_play"))
                 && (title || !flagged(component, "only_on_title"))
         })
-        .map(|component| {
+        .scan(0_u8, |buttons, component| {
             let defaults = loom_scene::components::Hud::default();
             #[allow(clippy::cast_possible_truncation)]
             let scalar = |name: &str, fallback: f32| {
@@ -182,11 +187,12 @@ pub(crate) fn elements(
                 .and_then(|k| match k {
                     "bar" => Some(loom_scene::components::HudKind::Bar),
                     "panel" => Some(loom_scene::components::HudKind::Panel),
+                    "button" => Some(loom_scene::components::HudKind::Button),
                     _ => None,
                 })
                 .unwrap_or(loom_scene::components::HudKind::Text);
 
-            Element {
+            Some(Element {
                 anchor: align(anchor),
                 // Always *inward*: an offset of 16 means 16 pixels from the
                 // edge you anchored to, whichever edge that is. Signed screen
@@ -206,9 +212,48 @@ pub(crate) fn elements(
                 },
                 fill,
                 opacity: scalar("opacity", defaults.opacity),
-            }
+                // **Numbered in world order, over the filtered list.** The
+                // filter is `only_in_play`/`only_on_title`, which both lockstep
+                // peers evaluate identically because they are in the same state
+                // of the same game — so the index one peer sends is the button
+                // the other resolves. Saturating: a HUD with 256 buttons gets
+                // the last one wrong rather than wrapping to the first.
+                index: if kind == loom_scene::components::HudKind::Button {
+                    *buttons = buttons.saturating_add(1);
+                    *buttons
+                } else {
+                    0
+                },
+            })
         })
         .collect()
+}
+
+/// The node path of the `index`th `Hud` button, in world order — ADR 0111.
+///
+/// **The other half of the wire's number.** `Intent` carries an index because a
+/// fixed-width frame cannot carry a name; this turns it back into a path, and it
+/// does so from the scene, which is the thing lockstep peers are guaranteed to
+/// share. Counting here rather than in `elements` because the runner has a
+/// world and no overlay: a tick must resolve a press whether or not anything
+/// drew this frame.
+///
+/// Counts every button the scene has, unfiltered — the visibility flags are
+/// evaluated identically on both peers, but a press that arrived over the wire
+/// is a fact about a button that *was* on screen, and re-deriving that from a
+/// state one tick apart is a race this does not need to have.
+pub(crate) fn button_path(world: &loom_ecs::World, index: u8) -> Option<String> {
+    let mut seen = 0_u8;
+    for (path, component) in world.hud_element_nodes() {
+        if component.get("kind").and_then(serde_json::Value::as_str) != Some("button") {
+            continue;
+        }
+        seen = seen.saturating_add(1);
+        if seen == index {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// Draw the resolved elements into the viewport.
@@ -231,9 +276,29 @@ pub(crate) fn elements(
 ///
 /// Returns the viewport and where each element landed, which is what makes
 /// the placement testable without a window.
+#[cfg(test)]
 pub(crate) fn draw(
     root: &mut egui::Ui,
     elements: &[Element],
+) -> (egui::Rect, Vec<egui::Rect>) {
+    draw_interactive(root, elements, &mut 0)
+}
+
+/// As [`draw`], reporting which button was pressed — ADR 0111.
+///
+/// **Only a button claims input, and only over its own rectangle.** This module
+/// paints rather than lays out precisely so that a HUD cannot steal a click: an
+/// earlier transparent `CentralPanel` fixed the anchoring and broke the trigger,
+/// because a panel is an interactive region and egui reported every click in the
+/// viewport as consumed. `Ui::interact` over one rect claims that rect and
+/// nothing else, so the crosshair keeps working an inch away from a menu item.
+///
+/// Writes the pressed button's 1-based index — its position among the scene's
+/// button elements in world order — into `pressed`, or leaves it alone.
+pub(crate) fn draw_interactive(
+    root: &mut egui::Ui,
+    elements: &[Element],
+    pressed: &mut u8,
 ) -> (egui::Rect, Vec<egui::Rect>) {
     if elements.is_empty() {
         return (egui::Rect::NOTHING, Vec::new());
@@ -251,7 +316,9 @@ pub(crate) fn draw(
     ordered.sort_by_key(|e| match e.kind {
         loom_scene::components::HudKind::Panel => 0,
         loom_scene::components::HudKind::Bar => 1,
-        loom_scene::components::HudKind::Text => 2,
+        // A button is a box with a label on it, so it paints with the text —
+        // after the backdrops that may sit under it.
+        loom_scene::components::HudKind::Text | loom_scene::components::HudKind::Button => 2,
     });
 
     let painted = ordered
@@ -308,6 +375,39 @@ pub(crate) fn draw(
                     filled.set_right(track.left() + track.width() * element.fill);
                     painter.rect_filled(filled, 2.0, element.color);
                     return track;
+                }
+                loom_scene::components::HudKind::Button => {
+                    let rect = boxed(element.extent);
+                    // **Claims this rectangle and no more.** `Sense::click` on
+                    // one rect is the whole of the input this module takes.
+                    let response = root.interact(
+                        rect,
+                        egui::Id::new(("loom_hud_button", element.index)),
+                        egui::Sense::click(),
+                    );
+                    let [r, g, b, _] = element.color.to_array();
+                    let lift = if response.hovered() { 40 } else { 0 };
+                    painter.rect_filled(
+                        rect,
+                        4.0,
+                        egui::Color32::from_rgba_unmultiplied(
+                            r.saturating_add(lift),
+                            g.saturating_add(lift),
+                            b.saturating_add(lift),
+                            alpha(element.opacity),
+                        ),
+                    );
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        &element.text,
+                        font,
+                        egui::Color32::WHITE,
+                    );
+                    if response.clicked() {
+                        *pressed = element.index;
+                    }
+                    return rect;
                 }
                 loom_scene::components::HudKind::Text => {}
             }
@@ -1211,6 +1311,101 @@ mod tests {
             claimed = ctx.is_pointer_over_egui();
         }
         claimed
+    }
+
+    /// **Every authored kind survives the trip from the scene** — ADR 0111.
+    ///
+    /// The four tests around this one build `Element` directly, so none of them
+    /// touched the string-to-kind mapping — and `button` was missing from it.
+    /// The buttons drew as plain coloured text with no box, `--hold ui=1` still
+    /// raised the event because `button_path` reads the component itself, and
+    /// every test passed. A screenshot found it. This is the test that should
+    /// have.
+    #[test]
+    fn a_kind_authored_in_a_scene_arrives_as_that_kind() {
+        for (authored, expected) in [
+            ("text", loom_scene::components::HudKind::Text),
+            ("bar", loom_scene::components::HudKind::Bar),
+            ("panel", loom_scene::components::HudKind::Panel),
+            ("button", loom_scene::components::HudKind::Button),
+        ] {
+            let world = loom_ecs::World::from_scene(
+                &loom_scene::Scene::parse(&format!(
+                    "[scene]\nformat = 1\nid = \"2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e\"\n\n\
+                     [[node]]\nname = \"Root\"\n\n\
+                       [node.components.Hud]\n  kind = \"{authored}\"\n  text = \"x\"\n"
+                ))
+                .expect("valid scene"),
+            );
+
+            let resolved = elements(&world, &GameState::default(), false, false);
+
+            assert_eq!(resolved[0].kind, expected, "`{authored}` did not survive");
+        }
+    }
+
+    /// **A click on a button presses it; a click beside it does not** —
+    /// ADR 0111.
+    ///
+    /// This module paints rather than lays out for exactly this reason: a
+    /// transparent `CentralPanel` once fixed the HUD's anchoring and broke the
+    /// trigger, because a panel is an interactive region and egui reported every
+    /// click in the viewport as consumed. The crosshair was visible and the gun
+    /// did nothing. A button has to take input, so the question is live again —
+    /// and the answer has to be that it takes input over its own rectangle only.
+    #[test]
+    fn a_click_lands_on_the_button_and_nowhere_else() {
+        // Centred in a 1000x600 viewport, so the button spans x 400..600,
+        // y 276..324.
+        assert_eq!(press_at(egui::pos2(500.0, 300.0)), 1, "a click on it must press it");
+        assert_eq!(press_at(egui::pos2(500.0, 500.0)), 0, "below it is the game, not the menu");
+        assert_eq!(press_at(egui::pos2(200.0, 300.0)), 0, "beside it is the game too");
+    }
+
+    /// Click a 200x48 centred button at `at` and return the index it reported.
+    fn press_at(at: egui::Pos2) -> u8 {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..egui::RawInput::default()
+        };
+        let element = Element {
+            anchor: egui::Align2::CENTER_CENTER,
+            kind: loom_scene::components::HudKind::Button,
+            text: "START".to_owned(),
+            extent: egui::vec2(200.0, 48.0),
+            index: 1,
+            ..Element::default()
+        };
+
+        // Two passes: egui needs the widget's rect from a previous frame before
+        // it will resolve a click on it.
+        let mut pressed = 0;
+        for _ in 0..2 {
+            pressed = 0;
+            let _ = ctx.run_ui(input.clone(), |root| {
+                let _ = draw_interactive(root, std::slice::from_ref(&element), &mut pressed);
+            });
+        }
+        pressed
     }
 
     /// **Every line is drawn twice, and the first one is dark.** The demo's

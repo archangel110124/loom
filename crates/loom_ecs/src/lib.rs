@@ -748,6 +748,19 @@ impl World {
         self.order.iter().filter_map(|e| self.hud.get(*e)).collect()
     }
 
+    /// The same elements, each with the path of the node that declares it.
+    ///
+    /// **A press has to name a node** — ADR 0111. A `Hud` button's identity is
+    /// its node path, so the runner needs the path beside the component, and
+    /// `hud_elements` deliberately hands over only the component.
+    #[must_use]
+    pub fn hud_element_nodes(&self) -> Vec<(String, &serde_json::Value)> {
+        self.order
+            .iter()
+            .filter_map(|e| Some((self.path(*e)?.to_owned(), self.hud.get(*e)?)))
+            .collect()
+    }
+
     /// The `Blast` a node declares, if any.
     #[must_use]
     pub fn blast(&self, entity: Entity) -> Option<&serde_json::Value> {

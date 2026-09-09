@@ -1113,6 +1113,13 @@ pub enum HudKind {
     Bar,
     /// A flat rectangle, drawn behind everything else so text can sit on it.
     Panel,
+    /// A box with a label that a player can press — ADR 0111.
+    ///
+    /// **The node's own path is its identity**, so there is no id to author and
+    /// no number to keep in step between the scene and the script. A press
+    /// arrives at a rules script as an ordinary event: `kind = "ui"`, `node` the
+    /// button's path.
+    Button,
 }
 
 impl Default for Hud {

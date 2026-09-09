@@ -116,6 +116,11 @@ pub struct Motion {
     /// otherwise holding it jumps again the instant the character lands.
     pub jump: bool,
     pub sprint: bool,
+    /// Which on-screen button was pressed this tick — ADR 0111. The 1-based
+    /// index of a `Hud` button among the scene's, in world order; zero for none.
+    /// A rules script never sees this number: the runner turns it into a `ui`
+    /// event carrying the button's node path.
+    pub ui: u8,
     /// True on the tick the fire button went down. Pressed, not held, for the
     /// same reason as `jump`.
     pub fire: bool,
@@ -283,6 +288,7 @@ impl Default for Motion {
             aim: [0.0, 0.0, -1.0],
             jump: false,
             sprint: false,
+            ui: 0,
             fire: false,
             interact: false,
             bag: false,

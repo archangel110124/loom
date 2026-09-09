@@ -872,6 +872,9 @@ struct App {
     fluid_draw_ms: (f64, f64, f64),
     /// The last few seconds of frame costs, for the Profiler tab — ADR 0106.
     frames: FrameHistory,
+    /// The on-screen button clicked this frame, waiting for the next tick to
+    /// take it — ADR 0111. Zero for none.
+    ui_pressed: u8,
     /// The `.rhai` open in the Script tab, its buffer, and why it was refused —
     /// ADR 0109. The buffer lives here rather than in the panel because a panel
     /// is a pure function of what it is handed; the text between opening a file
@@ -1062,6 +1065,7 @@ impl App {
             wall_last: None,
             fluid_draw_ms: (0.0, 0.0, 0.0),
             frames: FrameHistory::default(),
+            ui_pressed: 0,
             open_script: None,
             script_source: String::new(),
             script_on_disk: String::new(),
@@ -2059,6 +2063,9 @@ impl ApplicationHandler for App {
                 };
 
                 let mut actions = Vec::new();
+                // Filled by the overlay's own hit test, inside the build
+                // closure, and taken out to `self` once the borrows are done.
+                let mut ui_pressed = 0_u8;
                 // Snapshotted once per frame rather than read inside the
                 // panel: the panels crate cannot reach the global store, and
                 // one snapshot per frame is also one lock rather than one per
@@ -2521,7 +2528,15 @@ impl ApplicationHandler for App {
                             // value and were thrown away until the room code
                             // needed somewhere to stand — see
                             // [`room_code_panel`].
-                            let (_, painted) = crate::hud::draw(root, &overlay);
+                            // A press is collected here and consumed by the
+                            // next tick's input — ADR 0111. Written into a
+                            // local rather than `self` because the frame's
+                            // borrows are live; carried across below.
+                            let (_, painted) = crate::hud::draw_interactive(
+                                root,
+                                &overlay,
+                                &mut ui_pressed,
+                            );
                             // **The creel, over the HUD and under the
                             // pause menu**, painted into the root `Ui`
                             // so it claims neither the pointer nor the
@@ -2603,6 +2618,11 @@ impl ApplicationHandler for App {
                         return;
                     }
                     None => {}
+                }
+                // Out of the frame's borrows and onto `self`, where the next
+                // tick's input will take it — ADR 0111.
+                if ui_pressed != 0 {
+                    self.ui_pressed = ui_pressed;
                 }
                 for action in actions {
                     self.act(action);
@@ -2934,13 +2954,21 @@ impl App {
                 fire: held.fire,
                 interact: held.interact,
                 bag: held.bag,
+                ui: held.ui,
             });
             return;
         }
         // Only while the pointer is captured. Otherwise typing in a panel
         // would walk the character around behind the human's back.
+        // **A menu click arrives with the pointer free, not captured** — that
+        // is what a menu is. Clearing the input here used to be right because
+        // nothing but the captured window could produce any; a button press can,
+        // so it is carried through rather than zeroed with the rest.
         if !self.captured {
-            play.set_input(crate::play::PlayerInput::default());
+            play.set_input(crate::play::PlayerInput {
+                ui: std::mem::take(&mut self.ui_pressed),
+                ..crate::play::PlayerInput::default()
+            });
             return;
         }
         play.set_input(crate::play::PlayerInput {
@@ -2953,6 +2981,7 @@ impl App {
             fire: self.input.is_active(&self.bindings, PLAY, "fire"),
             interact: self.input.is_active(&self.bindings, PLAY, "interact"),
             bag: self.input.is_active(&self.bindings, PLAY, "bag"),
+            ui: std::mem::take(&mut self.ui_pressed),
         });
     }
 
