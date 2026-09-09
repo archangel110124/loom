@@ -24,13 +24,39 @@ use loom_script::GameState;
 /// line on a large one.
 const SHADOW: egui::Vec2 = egui::vec2(2.0, 2.0);
 
-/// One resolved line, ready to draw.
+/// One resolved element, ready to draw — ADR 0110.
 pub(crate) struct Element {
     anchor: egui::Align2,
     offset: egui::Vec2,
     text: String,
     size: f32,
     color: egui::Color32,
+    kind: loom_scene::components::HudKind,
+    /// Width and height in points, for a bar or a panel.
+    extent: egui::Vec2,
+    /// How full a bar is, 0..=1, already mapped through its authored range.
+    fill: f32,
+    /// A panel's fill alpha and a bar's track alpha.
+    opacity: f32,
+}
+
+#[cfg(test)]
+impl Default for Element {
+    /// A plain text element — what every `Hud` was before ADR 0110, and the
+    /// base the placement tests below vary one field of.
+    fn default() -> Self {
+        Self {
+            anchor: egui::Align2::LEFT_TOP,
+            offset: egui::Vec2::ZERO,
+            text: String::new(),
+            size: 22.0,
+            color: egui::Color32::WHITE,
+            kind: loom_scene::components::HudKind::Text,
+            extent: egui::vec2(180.0, 14.0),
+            fill: 1.0,
+            opacity: 0.55,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +150,42 @@ pub(crate) fn elements(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("top_left");
 
+            // **A missing number reads full, not empty.** A bar that vanished
+            // because the rules script had not written `oxygen` yet would look
+            // like a broken bar rather than an unstarted game — and in the
+            // editor, where there is no game at all, every bar would be an
+            // invisible rectangle you could not find to move.
+            let value = component
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let range = pair("range", defaults.range);
+            let fill = if value.is_empty() {
+                1.0
+            } else {
+                #[allow(clippy::cast_possible_truncation)]
+                match state.number(value) {
+                    Some(v) => {
+                        let span = range[1] - range[0];
+                        if span.abs() < f32::EPSILON {
+                            1.0
+                        } else {
+                            ((v as f32 - range[0]) / span).clamp(0.0, 1.0)
+                        }
+                    }
+                    None => 1.0,
+                }
+            };
+            let kind = component
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|k| match k {
+                    "bar" => Some(loom_scene::components::HudKind::Bar),
+                    "panel" => Some(loom_scene::components::HudKind::Panel),
+                    _ => None,
+                })
+                .unwrap_or(loom_scene::components::HudKind::Text);
+
             Element {
                 anchor: align(anchor),
                 // Always *inward*: an offset of 16 means 16 pixels from the
@@ -137,6 +199,13 @@ pub(crate) fn elements(
                 text: interpolate(text, state),
                 size: scalar("size", defaults.size),
                 color: to_color(rgb),
+                kind,
+                extent: {
+                    let e = pair("extent", defaults.extent);
+                    egui::vec2(e[0], e[1])
+                },
+                fill,
+                opacity: scalar("opacity", defaults.opacity),
             }
         })
         .collect()
@@ -172,11 +241,77 @@ pub(crate) fn draw(
     let viewport = root.available_rect_before_wrap();
     let painter = root.painter().with_clip_rect(viewport);
 
-    let painted = elements
+    // **Panels, then bars, then text** — ADR 0110. A backdrop authored after the
+    // line it backs would otherwise paint over it, and "why did my label
+    // disappear when I added a panel" is a question a scene author should never
+    // have to ask. The order is what a human means by a backdrop rather than
+    // something they have to arrange, and within a kind the scene's own order is
+    // kept, so two panels still stack the way they were written.
+    let mut ordered: Vec<&Element> = elements.iter().collect();
+    ordered.sort_by_key(|e| match e.kind {
+        loom_scene::components::HudKind::Panel => 0,
+        loom_scene::components::HudKind::Bar => 1,
+        loom_scene::components::HudKind::Text => 2,
+    });
+
+    let painted = ordered
         .iter()
         .map(|element| {
             let at = element.anchor.pos_in_rect(&viewport) + element.offset;
             let font = egui::FontId::proportional(element.size);
+
+            // A rectangle sits *from* its anchor the way text does: the anchor
+            // names the corner the offset is measured from, so the box grows
+            // inward from that corner rather than being centred on the point.
+            let boxed = |extent: egui::Vec2| {
+                let min = egui::pos2(
+                    match element.anchor.x() {
+                        egui::Align::Max => at.x - extent.x,
+                        egui::Align::Center => at.x - extent.x * 0.5,
+                        egui::Align::Min => at.x,
+                    },
+                    match element.anchor.y() {
+                        egui::Align::Max => at.y - extent.y,
+                        egui::Align::Center => at.y - extent.y * 0.5,
+                        egui::Align::Min => at.y,
+                    },
+                );
+                egui::Rect::from_min_size(min, extent)
+            };
+
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let alpha = |a: f32| (a.clamp(0.0, 1.0) * 255.0) as u8;
+            match element.kind {
+                loom_scene::components::HudKind::Panel => {
+                    let rect = boxed(element.extent);
+                    // The authored colour at the authored opacity. Unmultiplied,
+                    // because `color` is the colour a human picked in the swatch
+                    // and premultiplying it here would darken it as it faded.
+                    let [r, g, b, _] = element.color.to_array();
+                    painter.rect_filled(
+                        rect,
+                        4.0,
+                        egui::Color32::from_rgba_unmultiplied(r, g, b, alpha(element.opacity)),
+                    );
+                    return rect;
+                }
+                loom_scene::components::HudKind::Bar => {
+                    let track = boxed(element.extent);
+                    // The track first, at the authored opacity, so an empty bar
+                    // is still a visible thing in a place.
+                    painter.rect_filled(
+                        track,
+                        2.0,
+                        egui::Color32::from_black_alpha(alpha(element.opacity)),
+                    );
+                    let mut filled = track;
+                    filled.set_right(track.left() + track.width() * element.fill);
+                    painter.rect_filled(filled, 2.0, element.color);
+                    return track;
+                }
+                loom_scene::components::HudKind::Text => {}
+            }
+
             // **A shadow under every line, because a HUD has no control over
             // what is behind it.** The demo's inventory row is authored cream
             // (`[0.86, 0.89, 0.82]`) and at the opening heading it lands on a
@@ -1016,6 +1151,7 @@ mod tests {
             text: "SCORE 0".to_owned(),
             size: 20.0,
             color: egui::Color32::WHITE,
+            ..Element::default()
         };
 
         let mut result = (egui::Rect::NOTHING, egui::Rect::NOTHING);
@@ -1059,6 +1195,7 @@ mod tests {
             text: "+".to_owned(),
             size: 26.0,
             color: egui::Color32::WHITE,
+            ..Element::default()
         };
 
         let mut claimed = false;
@@ -1097,6 +1234,7 @@ mod tests {
             text: "HOLD 2/4".to_owned(),
             size: 19.0,
             color: egui::Color32::from_rgb(219, 227, 209),
+            ..Element::default()
         };
 
         let mut texts = Vec::new();
@@ -1805,6 +1943,144 @@ mod tests {
         );
     }
 
+    /// **A bar reads the game's own number through its authored range**
+    /// — ADR 0110. The range is the point: a game keeps oxygen in seconds and a
+    /// hold in kilograms, and a bar that assumed 0..1 would be full from the
+    /// first tick of every game ever written.
+    #[test]
+    fn a_bar_fills_from_the_state_through_its_range() {
+        let world = loom_ecs::World::from_scene(
+            &loom_scene::Scene::parse(
+                "[scene]\nformat = 1\nid = \"9d2e1a63-8b45-4c79-a1f2-3056b9d48e01\"\n\n\
+                 [[node]]\nname = \"Root\"\n\n\
+                   [node.components.Hud]\n  kind = \"bar\"\n  value = \"oxygen\"\n\
+                   range = [0.0, 180.0]\n",
+            )
+            .expect("valid scene"),
+        );
+        let mut host = loom_script::ScriptHost::default();
+        host.compile("r", "state.oxygen = 45.0;").expect("valid");
+        let mut state = GameState::default();
+        let view = loom_script::WorldView { positions: &[], events: &[], submersion: &[] };
+        host.rules("r", 1, 1.0 / 60.0, &view, &mut state).expect("runs");
+
+        let resolved = elements(&world, &state, true, false);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].kind, loom_scene::components::HudKind::Bar);
+        assert!(
+            (resolved[0].fill - 0.25).abs() < 1e-5,
+            "45 of 180 is a quarter, got {}",
+            resolved[0].fill
+        );
+    }
+
+    /// **A number the game has not written yet reads full, not empty.** A bar
+    /// that vanished before its rules script ran would look like a broken bar;
+    /// in the editor, where there is no game at all, every bar would be an
+    /// invisible rectangle nobody could find to move.
+    #[test]
+    fn a_bar_with_no_number_yet_reads_full() {
+        let world = loom_ecs::World::from_scene(
+            &loom_scene::Scene::parse(
+                "[scene]\nformat = 1\nid = \"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\"\n\n\
+                 [[node]]\nname = \"Root\"\n\n\
+                   [node.components.Hud]\n  kind = \"bar\"\n  value = \"never_written\"\n",
+            )
+            .expect("valid scene"),
+        );
+
+        let resolved = elements(&world, &GameState::default(), false, false);
+
+        assert!((resolved[0].fill - 1.0).abs() < 1e-5, "got {}", resolved[0].fill);
+    }
+
+    /// **A box grows inward from its anchor, like text does** — ADR 0110.
+    ///
+    /// The anchor names the corner the offset is measured from, so a panel
+    /// anchored bottom-right must extend up and left from that point. Centred
+    /// on the point, or grown down-right from it, a corner panel would sit half
+    /// off the screen — and that is four cases per axis to get right, which is
+    /// exactly the kind of thing that looks fine in the one corner it was
+    /// written against.
+    #[test]
+    fn a_panel_grows_inward_from_whichever_corner_it_is_anchored_to() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+
+        for (anchor, offset, name) in [
+            (egui::Align2::LEFT_TOP, egui::vec2(20.0, 10.0), "top left"),
+            (egui::Align2::RIGHT_BOTTOM, egui::vec2(-20.0, -10.0), "bottom right"),
+            (egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0), "centre"),
+        ] {
+            let element = Element {
+                anchor,
+                offset,
+                kind: loom_scene::components::HudKind::Panel,
+                extent: egui::vec2(200.0, 100.0),
+                ..Element::default()
+            };
+            let mut painted = egui::Rect::NOTHING;
+            for _ in 0..2 {
+                let _ = ctx.run_ui(input.clone(), |root| {
+                    painted = draw(root, std::slice::from_ref(&element)).1[0];
+                });
+            }
+
+            assert!(
+                (painted.width() - 200.0).abs() < 0.5 && (painted.height() - 100.0).abs() < 0.5,
+                "{name}: the box is not its authored extent: {painted:?}"
+            );
+            let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 600.0));
+            assert!(
+                viewport.contains_rect(painted),
+                "{name}: the box left the viewport: {painted:?}"
+            );
+        }
+    }
+
+    /// **A panel draws behind the text it backs, whatever order it was authored
+    /// in.** Otherwise "why did my label disappear when I added a backdrop" is a
+    /// question every scene author asks once.
+    #[test]
+    fn a_panel_is_drawn_before_the_text_even_when_authored_after_it() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        // Authored text first, panel second — the order that used to hide the
+        // text under the backdrop.
+        let elements = vec![
+            Element { text: "on top".to_owned(), ..Element::default() },
+            Element { kind: loom_scene::components::HudKind::Panel, ..Element::default() },
+        ];
+        let mut painted = Vec::new();
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |root| {
+                painted = draw(root, &elements).1;
+            });
+        }
+
+        // Two shapes, and the panel's rect is the first of them: `draw` returns
+        // them in the order it painted.
+        assert_eq!(painted.len(), 2);
+        assert!(
+            painted[0].width() > 100.0,
+            "the first thing painted should be the 180-point panel, got {:?}",
+            painted[0]
+        );
+    }
+
     #[test]
     fn a_state_number_lands_in_the_text() {
         let mut host = loom_script::ScriptHost::default();
@@ -1878,6 +2154,7 @@ mod tests {
             text: text.to_owned(),
             size,
             color: egui::Color32::WHITE,
+            ..Element::default()
         };
         let mut width = 0.0_f32;
         // Two passes: egui has no fonts loaded on the first.

@@ -1064,6 +1064,55 @@ pub struct Hud {
     /// not appear over it — which is exactly what an `only_in_play = false`
     /// title would have done.
     pub only_on_title: bool,
+    /// What this element *is* — ADR 0110.
+    ///
+    /// **A kind on `Hud` rather than three components.** A bar and a backdrop
+    /// share everything that makes a HUD element a HUD element: the anchor, the
+    /// inward offset, the two visibility flags, the colour, and being collected
+    /// by `World::hud_elements`. Three components would have been three copies
+    /// of that, three registry entries to keep in step, and a scene that wants a
+    /// labelled bar would carry two nodes instead of two components.
+    ///
+    /// `text` is the default, so every scene authored before this renders byte
+    /// for byte as it did.
+    pub kind: HudKind,
+    /// Width and height in points, for a `bar` or a `panel`.
+    ///
+    /// Ignored by `text`, which is sized by its glyphs.
+    #[schemars(inner(range(min = 0.0, max = 4096.0)))]
+    pub extent: [f32; 2],
+    /// The game-state number a `bar` fills from — `oxygen`, `health`, `depth`.
+    ///
+    /// Bare, not braced: `text` interpolates `{name}` *into a sentence*, and a
+    /// bar has no sentence to put it in. Empty reads full, which is also what an
+    /// unknown name reads as — a bar that vanished because a rules script had
+    /// not run yet would look like a bug in the bar.
+    pub value: String,
+    /// What `value` means at empty and at full.
+    ///
+    /// Authored rather than assumed 0..1, because the numbers a game already
+    /// keeps are in the units the game thinks in: oxygen in seconds, a hold in
+    /// kilograms, a depth in metres.
+    pub range: [f32; 2],
+    /// How opaque a `bar`'s track or a `panel`'s fill is.
+    ///
+    /// **A backdrop is the one HUD element that must not be solid.** The point
+    /// of it is to make text legible against a bright sky without hiding the
+    /// game behind it.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub opacity: f32,
+}
+
+/// What a `Hud` element draws — ADR 0110.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HudKind {
+    /// A line of text. The default, and everything `Hud` was before ADR 0110.
+    Text,
+    /// A track with a filled fraction of it, read from the game's own numbers.
+    Bar,
+    /// A flat rectangle, drawn behind everything else so text can sit on it.
+    Panel,
 }
 
 impl Default for Hud {
@@ -1076,6 +1125,11 @@ impl Default for Hud {
             color: [1.0; 3],
             only_in_play: false,
             only_on_title: false,
+            kind: HudKind::Text,
+            extent: [180.0, 14.0],
+            value: String::new(),
+            range: [0.0, 1.0],
+            opacity: 0.55,
         }
     }
 }
