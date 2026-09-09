@@ -3604,12 +3604,19 @@ impl App {
         // **What this engine can actually load, and nothing else.** Declaring a
         // `.fbx` would validate and then fail at mesh-build time, somewhere the
         // human is no longer looking.
+        // **What the engine actually reads, which is more than this used to
+        // allow.** `MeshLibrary` dispatches on extension — `.obj` through
+        // `import_obj`, anything else through `import_gltf`, which has been a
+        // dependency and a tested path since before this gesture existed. The
+        // drop handler whitelisted `obj` and `png` and turned glTF away at the
+        // door, so the engine could load a format the editor refused to import.
         let folder = match extension.as_str() {
-            "obj" => "meshes",
+            "obj" | "glb" | "gltf" => "meshes",
             "png" => "textures",
             other => {
                 crate::log::warn(format!(
-                    "{other} is not a format this engine reads — .obj for meshes, .png for textures"
+                    "{other} is not a format this engine reads — .obj, .glb or .gltf \
+                     for meshes, .png for textures"
                 ));
                 return;
             }
@@ -3639,6 +3646,23 @@ impl App {
             if let Err(e) = std::fs::copy(path, &target) {
                 crate::log::error(format!("{}: {e}", path.display()));
                 return;
+            }
+            // **A `.gltf` is a manifest, not a model.** It names its buffers and
+            // its textures by relative path, so copying the one file in leaves a
+            // scene referencing a mesh that cannot load — and the failure lands
+            // later, at mesh-build time, where nobody is looking. A `.glb` is
+            // self-contained and needs none of this.
+            if extension == "gltf" {
+                for name in gltf_sidecars(path) {
+                    let from = path.with_file_name(&name);
+                    let to = directory.join(&name);
+                    match std::fs::copy(&from, &to) {
+                        Ok(_) => crate::log::info(format!("  and {name}")),
+                        Err(e) => crate::log::warn(format!(
+                            "{name} is referenced by that glTF and did not copy: {e}"
+                        )),
+                    }
+                }
             }
             crate::log::info(format!("copied into {}", target.display()));
             target
@@ -5248,6 +5272,39 @@ fn component_defaults(
         .collect()
 }
 
+
+/// The files a `.gltf` names beside itself — its buffers and its images.
+///
+/// **Relative URIs only.** A `data:` URI is already inside the file, and an
+/// absolute or `http` one is not ours to copy. Anything with a path separator is
+/// skipped too: this copies into one flat folder, so a `textures/wood.png` would
+/// land somewhere the manifest does not name, and quietly reporting success on a
+/// file that will not load is the failure this exists to prevent — it is
+/// reported as a warning instead.
+fn gltf_sidecars(path: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for section in ["buffers", "images"] {
+        let Some(items) = json.get(section).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for uri in items.iter().filter_map(|i| i.get("uri")?.as_str()) {
+            if uri.starts_with("data:") || uri.contains("://") || uri.contains('/') {
+                continue;
+            }
+            if !found.iter().any(|f: &String| f == uri) {
+                found.push(uri.to_owned());
+            }
+        }
+    }
+    found
+}
+
 /// `to` written relative to `from`, both absolute.
 ///
 /// **No dependency for this.** `pathdiff` is a crate; this is the shared-prefix
@@ -5443,6 +5500,41 @@ mod tests {
         assert!(
             chosen.ends_with("zzz_game.loom"),
             "should prefer the game even though the fixture sorts first: {chosen}"
+        );
+    }
+
+    /// **A `.gltf` is a manifest, and its buffers must travel with it.**
+    /// Copying the one file in leaves a scene naming a mesh that cannot load,
+    /// and the failure lands at mesh-build time where nobody is looking.
+    #[test]
+    fn a_gltf_names_the_files_that_must_come_with_it() {
+        let dir = std::env::temp_dir().join("loom-gltf-sidecar-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("model.gltf");
+        std::fs::write(
+            &path,
+            r#"{
+              "buffers": [
+                { "uri": "model.bin" },
+                { "uri": "data:application/octet-stream;base64,AAAA" }
+              ],
+              "images": [
+                { "uri": "wood.png" },
+                { "uri": "textures/nested.png" },
+                { "uri": "https://example.invalid/remote.png" },
+                { "uri": "model.bin" }
+              ]
+            }"#,
+        )
+        .expect("fixture");
+
+        let found = super::gltf_sidecars(&path);
+
+        assert_eq!(
+            found,
+            vec!["model.bin".to_owned(), "wood.png".to_owned()],
+            "only the relative, flat, not-already-listed files"
         );
     }
 

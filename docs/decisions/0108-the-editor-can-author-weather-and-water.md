@@ -134,3 +134,47 @@ promising every claim in it was verified — so it had become the exact failure 
 was written to avoid, and a reader came away with four false beliefs. It now
 carries a superseded header naming what changed and where; its comparison
 against Unity, Unreal and Godot, and the gaps it lists, still stand.
+
+## Second addendum, after the re-grade — 2026-09-09
+
+The critic came back 7.5/10 and found one new defect of its own making — mine,
+strictly: the union of stored and schema fields made an old bug ubiquitous.
+
+**An empty array was a dead row.** `Iterator::all` is vacuously true on nothing,
+so `[]` matched the "all numbers" arm, drew zero drag boxes, and rendered as a
+blank line — shadowing the arm that owns `+ add`. That is every
+`Environment.stages` before its first stage, every `VoxelVolume.ops` before its
+first op, every `Buoyancy.pontoons` before its first pontoon, and any
+object-array whose last entry was just deleted. The bug predates the union
+change; the union change is what put an empty array on screen for every unwritten
+array field in the engine.
+
+An empty array cannot answer for itself, so `array_is_numeric` asks the schema:
+object items, or the untyped `items: true` a voxel recipe declares, route to the
+object arm where `+ add` lives; only a declared numeric item stays numeric, so
+nothing offers to append a table into a colour.
+
+**The nested grid got the same union**, for the same reason one level up did: a
+`Swell` authored without `fetch` — legal, absent means unlimited — showed two of
+its three fields with no way to reach the third.
+
+**The "no button" hover was giving a confident wrong answer.** It told anyone
+hovering `WaterBody.extent` that its "fields are refused rather than defaulted",
+which is true of `Swell` and meaningless about a two-component vector. A nullable
+list and a nullable group now say different things, because they are absent for
+different reasons.
+
+**And glTF was already supported.** The critic ranked "glTF import" as the single
+biggest thing missing, and `import_gltf` has been in `loom_asset` — a dependency,
+a tested path, and the extension dispatch every `MeshRenderer` goes through —
+since long before the drop gesture existed. What was wrong was one whitelist in
+`import_file`: it took `.obj` and `.png` and turned glTF away at the door, so the
+engine could load a format its own editor refused to import. `.glb` and `.gltf`
+are accepted now, and because a `.gltf` is a manifest rather than a model, the
+buffers and images it names beside itself are copied with it — a relative,
+flat, non-`data:` URI only, with anything else reported rather than silently
+dropped.
+
+That last one is worth naming as a category: the sharpest finding of two review
+rounds was not a missing feature. It was a capability the engine already had and
+one line of the editor refused.

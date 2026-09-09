@@ -1153,7 +1153,7 @@ pub(crate) fn assets(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Ve
         ui.heading("Assets");
         // Discoverable, because a gesture nobody is told about is a gesture
         // nobody uses — ADR 0105.
-        ui.weak("drop a .obj or .png on the window to import one");
+        ui.weak("drop a .obj, .glb, .gltf or .png on the window to import one");
     });
     ui.separator();
     egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -2462,6 +2462,27 @@ fn inspect_component(
     }
 }
 
+/// Does this array hold numbers — a vector, a colour, an attenuation triple?
+///
+/// **An empty array cannot answer for itself.** `Iterator::all` is vacuously
+/// true on nothing, so `[]` matched "all numbers", drew zero drag boxes, and
+/// left a blank row with no way to add anything to it. The schema knows: an
+/// array of `MoodStage` or of voxel ops declares object items (or `items: true`,
+/// the untyped union a voxel recipe is), and only a numeric one declares
+/// `number`. So an empty array is routed by its declaration and a populated one
+/// by what is in it.
+#[must_use]
+pub fn array_is_numeric(items: &[serde_json::Value], schema: Option<&serde_json::Value>) -> bool {
+    if !items.is_empty() {
+        return items.iter().all(serde_json::Value::is_number);
+    }
+    schema
+        .and_then(|s| s.get("items"))
+        .and_then(|i| i.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|t| matches!(t, "number" | "integer"))
+}
+
 /// The value a "set" button should write into an absent optional field.
 ///
 /// **The schema's own `minimum`, never a number chosen here.** The smallest
@@ -2612,7 +2633,7 @@ fn draw_field(
             }
         }
 
-        serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_number) => {
+        serde_json::Value::Array(items) if array_is_numeric(items, schema) => {
             let mut edited: Vec<f64> =
                 items.iter().filter_map(serde_json::Value::as_f64).collect();
             let (lo, hi) = schema
@@ -2733,17 +2754,41 @@ fn draw_field(
                         }
                     }
                     None => {
-                        ui.weak("?").on_hover_text(
+                        // **Two different reasons, said apart.** A nullable
+                        // *group* has no safe value because its own fields are
+                        // refused rather than defaulted; a nullable *list* has
+                        // no safe value because nobody declared what one entry
+                        // should start as. Telling a human that `extent` has
+                        // "fields refused at load" is a confident wrong answer
+                        // about a two-component vector.
+                        let list = schema
+                            .and_then(|s| s.get("type"))
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|types| {
+                                types.iter().any(|t| t.as_str() == Some("array"))
+                            });
+                        ui.weak("?").on_hover_text(if list {
+                            "an optional list with no value, and no declared \
+                             starting entry — author it with `loom scene --tx`, \
+                             or copy the component from a node that has one."
+                        } else {
                             "an optional group with no value. Its fields are refused \
                              rather than defaulted, so there is nothing safe to write \
                              here — copy the component from a node that has one, or \
-                             author it with `loom scene --tx`.",
-                        );
+                             author it with `loom scene --tx`."
+                        });
                     }
                 }
             });
         }
 
+        // Everything else array-shaped, **including an empty one**. `all(..)` is
+        // vacuously true on an empty iterator, so `[]` used to match the numeric
+        // arm above, draw zero drag boxes, and render as a blank dead row with
+        // no "+ add" anywhere — which is every `Environment.stages` before its
+        // first stage, every `VoxelVolume.ops` before its first op, and every
+        // object-array whose last entry you just deleted. `array_is_numeric`
+        // sends an empty array here by asking the schema what its items are.
         serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_object) => {
             array_of_objects(ui, path, key, items, schema, editable, actions);
         }
@@ -2791,8 +2836,28 @@ fn object_fields(
         let properties = schema
             .and_then(|s| s.get("properties"))
             .and_then(serde_json::Value::as_object);
-        for (key, value) in object {
+        // **The same union the top level does** — a nested optional field is
+        // invisible for the same reason its parent's were: TOML cannot write a
+        // null, so a `Swell` authored without `fetch` (legal — absent means
+        // unlimited fetch) showed two of its three fields and no way to reach
+        // the third.
+        let unwritten: Vec<&String> = properties
+            .map(|p| p.keys().filter(|k| !object.contains_key(*k)).collect())
+            .unwrap_or_default();
+        let mut rows: Vec<(&String, Option<&serde_json::Value>)> = object
+            .iter()
+            .map(|(key, value)| (key, Some(value)))
+            .chain(unwritten.into_iter().map(|key| (key, None)))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (key, stored) in rows {
             let spec = properties.and_then(|p| p.get(key));
+            let absent = spec
+                .and_then(|f| f.get("default"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let value = stored.unwrap_or(&absent);
             let doc = spec
                 .and_then(|f| f.get("description"))
                 .and_then(serde_json::Value::as_str)
@@ -2867,6 +2932,25 @@ fn object_fields(
                         );
                         changed = true;
                     }
+                }
+                // **The same affordance the top level has.** A nested optional
+                // is `null` here for exactly the reason its parent's was:
+                // nothing wrote it, and TOML has no way to.
+                serde_json::Value::Null => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(
+                            egui::RichText::new("not set").weak().italics().small(),
+                        ));
+                        if let Some(start) = optional_start(spec)
+                            && ui
+                                .add_enabled(editable, egui::Button::new("set").small())
+                                .on_hover_text(format!("starts at {start}, then drag"))
+                                .clicked()
+                        {
+                            edited.insert(key.clone(), start);
+                            changed = true;
+                        }
+                    });
                 }
                 other => {
                     ui.add(egui::Label::new(
@@ -3471,6 +3555,44 @@ name = \"A\"
             entry.get("phase").is_none(),
             "only required fields — an optional one left out keeps the file minimal"
         );
+    }
+
+    /// **An empty array is not an array of numbers.**
+    ///
+    /// `Iterator::all` is vacuously true on nothing, so `[]` matched the numeric
+    /// arm, drew zero drag boxes and left a blank row — no "+ add", no way in.
+    /// That is every `Environment.stages` before its first stage, every
+    /// `VoxelVolume.ops` before its first op, and any object-array whose last
+    /// entry was just deleted. The schema is what can answer for an empty array.
+    #[test]
+    fn an_empty_array_is_routed_by_its_schema_not_by_being_empty() {
+        let stages = serde_json::json!({
+            "type": "array", "default": [], "items": { "$ref": "#/$defs/MoodStage" },
+        });
+        assert!(
+            !super::array_is_numeric(&[], Some(&stages)),
+            "an empty stage list must reach the object arm, where `+ add` lives"
+        );
+
+        // A voxel recipe is a union of five shapes, so schemars writes
+        // `items: true` — untyped, and still not numeric.
+        let ops = serde_json::json!({ "type": "array", "default": [], "items": true });
+        assert!(!super::array_is_numeric(&[], Some(&ops)));
+
+        // An empty numeric array stays numeric: nothing should offer to append
+        // an object into a colour.
+        let colour = serde_json::json!({
+            "type": "array", "default": [], "items": { "type": "number" },
+        });
+        assert!(super::array_is_numeric(&[], Some(&colour)));
+
+        // A populated array answers for itself, schema or no schema.
+        let numbers = [serde_json::json!(1.0), serde_json::json!(2.0)];
+        assert!(super::array_is_numeric(&numbers, None));
+        let objects = [serde_json::json!({ "at": 0.0 })];
+        assert!(!super::array_is_numeric(&objects, None));
+        // And with no schema at all, an empty array is not claimed as numeric.
+        assert!(!super::array_is_numeric(&[], None));
     }
 
     /// **"set" writes the schema's own minimum, or offers nothing.**
