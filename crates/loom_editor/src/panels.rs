@@ -100,6 +100,10 @@ pub enum UiAction {
     /// Add a component of this type to the selection, at its defaults.
     AddComponent(String),
     RemoveComponent(String, String),
+    /// Remember a component's values, to write onto another node — ADR 0107.
+    CopyComponent(String, String),
+    /// Write the remembered component onto this node.
+    PasteComponent(String),
     /// Move `node` under `parent`.
     Reparent { node: String, parent: String },
     Play,
@@ -178,6 +182,15 @@ pub struct AgentTurn {
     pub text: String,
     /// What was selected when it was asked.
     pub about: Vec<String>,
+}
+
+/// One frame's measured cost — ADR 0106.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FrameCost {
+    pub cpu_ms: f32,
+    pub sim_ms: f32,
+    pub draw_ms: f32,
+    pub total_ms: f32,
 }
 
 /// A change the agent is offering, waiting on a human — ADR 0103.
@@ -265,6 +278,10 @@ pub struct PanelState<'a> {
     pub agent_busy: bool,
     /// Changes offered and not yet decided, oldest first — ADR 0103.
     pub agent_proposals: &'a [AgentProposal],
+    /// The last few seconds of frames, oldest first — ADR 0106.
+    pub frames: &'a [FrameCost],
+    /// The type name of the copied component, if there is one — ADR 0107.
+    pub copied_component: Option<&'a str>,
     /// Labels of transactions that were undone and can be redone, newest last.
     pub redo_history: &'a [String],
     /// The selection's bounding box, as screen-space edges — ADR 0099.
@@ -981,6 +998,23 @@ pub(crate) fn inspector(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut
                         type_name.clone(),
                     ));
                 }
+                // **Copy a whole component, not a field at a time** — ADR 0107.
+                // The demo boat carries fifteen material nodes; matching one to
+                // another meant reading five numbers off one and typing them
+                // into the next, which is how two things that should be the
+                // same drift apart.
+                if ui.small_button("⧉").on_hover_text("copy these values").clicked() {
+                    actions.push(UiAction::CopyComponent(path.clone(), type_name.clone()));
+                }
+                if state.copied_component == Some(type_name.as_str())
+                    && editing
+                    && ui
+                        .small_button("paste")
+                        .on_hover_text("write the copied values over these")
+                        .clicked()
+                {
+                    actions.push(UiAction::PasteComponent(path.clone()));
+                }
             });
             inspect_component(
                 ui,
@@ -1105,7 +1139,12 @@ pub(crate) fn assets(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Ve
         ui.separator();
     }
 
-    ui.heading("Assets");
+    ui.horizontal(|ui| {
+        ui.heading("Assets");
+        // Discoverable, because a gesture nobody is told about is a gesture
+        // nobody uses — ADR 0105.
+        ui.weak("drop a .obj or .png on the window to import one");
+    });
     ui.separator();
     egui::ScrollArea::horizontal().show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
@@ -1144,6 +1183,159 @@ pub(crate) fn assets(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Ve
             }
         });
     });
+}
+
+/// Where the frame went — ADR 0106.
+///
+/// **The status bar's numbers are smoothed and this one's are not.** Smoothing
+/// is right for a number read at a glance and hides exactly what a profiler is
+/// for: the editor reports `cpu 1.6 ms/frame mean` and `27.4 ms worst` in the
+/// same breath, and no smoothed number can tell you which frame that was or
+/// what it was doing.
+pub(crate) fn profiler(ui: &mut egui::Ui, state: &PanelState<'_>) {
+    ui.heading("Profiler");
+    ui.separator();
+    if state.frames.is_empty() {
+        ui.weak("no frames measured yet");
+        return;
+    }
+
+    let tokens = crate::theme::tokens(false);
+    let count = state.frames.len();
+    #[allow(clippy::cast_precision_loss)]
+    let n = count as f32;
+    let mean = |pick: fn(&FrameCost) -> f32| -> f32 {
+        state.frames.iter().map(pick).sum::<f32>() / n
+    };
+    let worst = |pick: fn(&FrameCost) -> f32| -> f32 {
+        state.frames.iter().map(pick).fold(0.0, f32::max)
+    };
+
+    // **The 99th percentile, not just the worst.** One 40 ms frame in four
+    // seconds is a window manager doing something; one in twenty is the engine,
+    // and the two read identically as a maximum.
+    let mut totals: Vec<f32> = state.frames.iter().map(|f| f.total_ms).collect();
+    totals.sort_by(f32::total_cmp);
+    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let p99 = totals[((n * 0.99) as usize).min(count - 1)];
+
+    ui.add_space(4.0);
+
+    // **The history, drawn.** A hitch is a shape, not a number: a sawtooth is a
+    // periodic rebuild, a single spike is a stall, a step is something that
+    // started and did not stop.
+    let height = 84.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(120.0), height),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, tokens.sunken);
+
+    // **Scaled to the p99, not to the worst.** Scaled to the worst, one 83 ms
+    // stall squashed every normal frame into a sliver a pixel high — a graph
+    // that showed the outlier and hid the thing it was an outlier *from*. The
+    // floor keeps an idle scene from magnifying half a millisecond of jitter
+    // into a mountain range.
+    let ceiling = p99.max(8.0);
+    #[allow(clippy::cast_precision_loss)]
+    let step = rect.width() / n.max(1.0);
+    for (i, frame) in state.frames.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let x = rect.left() + i as f32 * step;
+        let bar = |ms: f32, colour: egui::Color32| {
+            let h = (ms / ceiling).clamp(0.0, 1.0) * rect.height();
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(x, rect.bottom() - h),
+                    egui::vec2(step.max(1.0), h),
+                ),
+                0.0,
+                colour,
+            );
+        };
+        // Total behind, cpu in front: the gap between them is what the frame
+        // spent waiting rather than working.
+        bar(frame.total_ms, tokens.text_weak);
+        bar(frame.cpu_ms, tokens.accent);
+        // A frame taller than the scale is capped rather than clipped away —
+        // the whole point of a p99 scale is that the outliers are still there,
+        // and a bar that quietly stopped at the ceiling would deny it.
+        if frame.total_ms > ceiling {
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(x, rect.top()),
+                    egui::vec2(step.max(1.0), 3.0),
+                ),
+                0.0,
+                tokens.error,
+            );
+        }
+    }
+
+    // The 16.7 ms line, because "is this frame late" is the only question the
+    // graph is really being asked.
+    let sixty = rect.bottom() - (16.7 / ceiling).clamp(0.0, 1.0) * rect.height();
+    painter.line_segment(
+        [egui::pos2(rect.left(), sixty), egui::pos2(rect.right(), sixty)],
+        egui::Stroke::new(1.0, tokens.warn),
+    );
+    ui.horizontal(|ui| {
+        ui.colored_label(tokens.accent, "cpu");
+        ui.colored_label(tokens.text_weak, "frame");
+        ui.colored_label(tokens.warn, "60 fps");
+        ui.colored_label(tokens.error, "over scale");
+        ui.weak(format!("· scale {ceiling:.0} ms (p99)"));
+    });
+
+    // Scrolled, so a panel dragged short hides nothing permanently.
+    egui::ScrollArea::vertical()
+        .id_salt("profiler_numbers")
+        .show(ui, |ui| {
+    egui::Grid::new("profiler_numbers_grid")
+        .num_columns(4)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("");
+            ui.label("mean");
+            ui.label("worst");
+            ui.label("");
+            ui.end_row();
+
+            for (name, mean_ms, worst_ms, note) in [
+                ("frame", mean(|f| f.total_ms), worst(|f| f.total_ms),
+                 format!("p99 {p99:.1} ms")),
+                ("cpu", mean(|f| f.cpu_ms), worst(|f| f.cpu_ms),
+                 "input, step, draw calls, weather, panels".to_owned()),
+                ("— simulation", mean(|f| f.sim_ms), worst(|f| f.sim_ms),
+                 "the game's own share of cpu".to_owned()),
+                ("gpu submit", mean(|f| f.draw_ms), worst(|f| f.draw_ms),
+                 "submitting and presenting".to_owned()),
+            ] {
+                ui.label(name);
+                ui.label(egui::RichText::new(format!("{mean_ms:.2} ms")).monospace());
+                // A worst frame far above the mean is the finding, so it is
+                // coloured rather than left to be noticed.
+                let colour = if worst_ms > mean_ms * 4.0 && worst_ms > 4.0 {
+                    tokens.warn
+                } else {
+                    tokens.text_weak
+                };
+                ui.colored_label(colour, egui::RichText::new(format!("{worst_ms:.2} ms")).monospace());
+                ui.weak(note);
+                ui.end_row();
+            }
+        });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.weak(format!("{count} frames"));
+        ui.weak("·");
+        ui.weak(format!("{} nodes", state.paths.len()));
+        ui.weak("·");
+        ui.weak(format!("{} draws", state.object_count));
+    });
+        });
 }
 
 /// Unity's Console. The reason it exists is that the messages worth reading —
@@ -2831,6 +3023,8 @@ mod tests {
             agent_log: &[],
             agent_chat: &[],
             agent_proposals: &[],
+            frames: &[],
+            copied_component: None,
             agent_busy: false,
             renaming: None,
             redo_history: &[],
@@ -2899,6 +3093,8 @@ mod tests {
             agent_log: &[],
             agent_chat: &[],
             agent_proposals: &[],
+            frames: &[],
+            copied_component: None,
             agent_busy: false,
             renaming: None,
             redo_history: &[],

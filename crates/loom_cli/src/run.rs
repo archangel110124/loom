@@ -870,6 +870,14 @@ struct App {
     wall_last: Option<std::time::Instant>,
     /// The cinematic tier's presentation cost, summed: density, march, spray.
     fluid_draw_ms: (f64, f64, f64),
+    /// The last few seconds of frame costs, for the Profiler tab — ADR 0106.
+    frames: FrameHistory,
+    /// A component's values, remembered for pasting onto another node —
+    /// ADR 0107. The type name and the whole table, because a partial paste
+    /// would leave the target reading as neither one thing nor the other.
+    /// Separate from `clipboard`, which holds copied *nodes*: pasting a node
+    /// and pasting a material are different gestures onto different targets.
+    component_clipboard: Option<(String, serde_json::Value)>,
     fluid_draw_frames: u32,
     title: String,
 }
@@ -1044,6 +1052,8 @@ impl App {
             wall_worst_ms: 0.0,
             wall_last: None,
             fluid_draw_ms: (0.0, 0.0, 0.0),
+            frames: FrameHistory::default(),
+            component_clipboard: None,
             fluid_draw_frames: 0,
             agent_changes: Vec::new(),
             title,
@@ -1619,6 +1629,14 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Destroyed => self.shutdown(event_loop),
 
+            // **Bringing something in from outside** — ADR 0105. Handled here
+            // rather than through egui's `dropped_files`, which is read inside
+            // the panel closure; that closure is `FnMut` and may run twice in a
+            // frame, and importing a model twice because the layout settled is
+            // the kind of bug nobody would think to look for. Winit delivers
+            // one event per file, once.
+            WindowEvent::DroppedFile(path) => self.import_file(&path),
+
             // Keys are recorded by NAME and interpreted by the action map.
             // Nothing here knows what W means.
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1835,10 +1853,22 @@ impl ApplicationHandler for App {
                 // advance by exactly this, so they keep time with the physics
                 // instead of with the frame rate.
                 let before = self.play.as_ref().map_or(0, |p| p.ticks);
+                // **The one span worth naming separately** — ADR 0106. Every
+                // other cost in a frame is paid whether or not a game is
+                // running; this is the game. Instrumentation only, and outside
+                // the simulation's own clock — never-do #8 is about what the
+                // simulation reads, and nothing below is read by one.
+                #[allow(clippy::disallowed_methods)]
+                let sim_started = std::time::Instant::now();
                 if self.play.as_mut().is_some_and(|p| p.advance(dt)) {
                     self.refresh_play_objects();
                     self.spawn_new_detonations();
                 }
+                #[allow(clippy::disallowed_methods)]
+                let sim_ms = std::time::Instant::now()
+                    .duration_since(sim_started)
+                    .as_secs_f64()
+                    * 1000.0;
                 let stepped = self.play.as_ref().map_or(0, |p| p.ticks.saturating_sub(before));
                 self.report_game_result();
                 if stepped > 0 {
@@ -2020,6 +2050,19 @@ impl ApplicationHandler for App {
                         seconds_ago: now.duration_since(*at).as_secs_f32(),
                     })
                     .collect();
+                // Copied out into the panel's own shape: `loom_editor` is handed
+                // what it draws and never this crate's types.
+                let frame_costs: Vec<loom_editor::panels::FrameCost> = self
+                    .frames
+                    .in_order()
+                    .into_iter()
+                    .map(|f| loom_editor::panels::FrameCost {
+                        cpu_ms: f.cpu_ms,
+                        sim_ms: f.sim_ms,
+                        draw_ms: f.draw_ms,
+                        total_ms: f.total_ms,
+                    })
+                    .collect();
                 let state = PanelState {
                     rings: &self.rings,
                     planes: &self.planes,
@@ -2035,6 +2078,11 @@ impl ApplicationHandler for App {
                     agent_log: &agent_log,
                     agent_chat: &self.agent_chat,
                     agent_proposals: &self.agent_proposals,
+                    frames: &frame_costs,
+                    copied_component: self
+                        .component_clipboard
+                        .as_ref()
+                        .map(|(name, _)| name.as_str()),
                     agent_busy: self.agent_busy,
                     redo_history: self
                         .session
@@ -2287,6 +2335,27 @@ impl ApplicationHandler for App {
                 #[allow(clippy::cast_possible_truncation)]
                 {
                     self.cpu_worst_ms = self.cpu_worst_ms.max(cpu_ms as f32);
+                }
+                // **The history, unsmoothed** — ADR 0106. The status bar's
+                // numbers are exponentially smoothed, which is right for a
+                // number you read at a glance and hides exactly the thing a
+                // profiler is for: this window reported `cpu 1.6 ms/frame mean`
+                // and `27.4 ms worst` in the same breath, and no smoothed
+                // number can show you which frame that was.
+                // **The first frame is not a frame.** Its `dt` runs from
+                // `App::new` and so contains window creation, Vulkan init and
+                // the scene build: the first reading this panel ever took was
+                // 4842 ms, which dragged the mean from 11.6 to 32.0 and made
+                // the maximum meaningless. Measuring it is not wrong; calling
+                // it a frame time is.
+                #[allow(clippy::cast_possible_truncation)]
+                if self.cpu_frames > 1 {
+                self.frames.push(FrameSample {
+                    cpu_ms: cpu_ms as f32,
+                    sim_ms: sim_ms as f32,
+                    draw_ms: self.draw_ms,
+                    total_ms: dt * 1000.0,
+                });
                 }
 
                 // Bound out of `self` before the match so the borrow checker
@@ -2621,6 +2690,8 @@ impl App {
             UiAction::OpenScene(path) => self.open_scene(&path),
             UiAction::SendToAgent(text) => self.ask_agent(&text),
             UiAction::DecideProposal { id, apply } => self.decide_proposal(id, apply),
+            UiAction::CopyComponent(node, component) => self.copy_component(&node, &component),
+            UiAction::PasteComponent(node) => self.paste_component(&node),
             UiAction::DropAsset { alias, at } => self.drop_asset(&alias, at),
             UiAction::NewScene => self.new_scene(),
             UiAction::SaveAs(name) => self.save_as(&name),
@@ -3469,6 +3540,171 @@ impl App {
         self.agent_changes.clear();
         self.show(&text);
         crate::log::info(format!("opened {}", path.display()));
+    }
+
+    /// Remember a component's values — ADR 0107.
+    fn copy_component(&mut self, node: &str, component: &str) {
+        let Some(value) = self
+            .view
+            .scene
+            .nodes()
+            .iter()
+            .find(|n| n.path == node)
+            .and_then(|n| n.components.get(component))
+            .cloned()
+        else {
+            crate::log::warn(format!("{node} has no {component} to copy"));
+            return;
+        };
+        crate::log::info(format!("copied {component} from {node}"));
+        self.component_clipboard = Some((component.to_owned(), value));
+    }
+
+    /// Write the remembered component onto another node — ADR 0107.
+    ///
+    /// **One transaction over every field, not a component swap.** There is no
+    /// op that replaces a whole component, and adding one to carry a clipboard
+    /// would be a second way to write a component — the thing this editor has
+    /// spent its whole design avoiding. `SetField` per key is the ordinary path,
+    /// and the fields arrive as one undo step because a transaction is one.
+    fn paste_component(&mut self, node: &str) {
+        let Some((component, value)) = self.component_clipboard.clone() else {
+            return;
+        };
+        let Some(fields) = value.as_object() else {
+            crate::log::warn(format!("{component} is not a table of fields"));
+            return;
+        };
+        let ops: Vec<loom_scene::SceneOp> = fields
+            .iter()
+            .map(|(field, value)| loom_scene::SceneOp::SetField {
+                node: node.to_owned(),
+                field: format!("{component}.{field}"),
+                value: value.clone(),
+            })
+            .collect();
+        if ops.is_empty() {
+            crate::log::warn(format!("{component} has no fields to paste"));
+            return;
+        }
+        // A node without the component gets it: `SetField` writes the table.
+        self.transact(format!("Paste {component} onto {node}"), ops);
+    }
+
+    /// Take something dropped on the window into the project — ADR 0105.
+    ///
+    /// **The import that was missing.** `SceneOp::Declare` has existed since the
+    /// op layer did, and its own doc says authoring one was CLI-only — "the
+    /// editor could reference an asset but never introduce one". Nothing in the
+    /// editor called it. So a model you had was a model you could not use
+    /// without editing the scene file by hand.
+    ///
+    /// A file already inside the project is declared where it lies. One from
+    /// outside is **copied in first**: a scene that references
+    /// `/home/somebody/Downloads/boat.obj` is a scene that works on one machine,
+    /// and `loom pack` would have nothing to fold in.
+    fn import_file(&mut self, path: &std::path::Path) {
+        // A scene is not an asset — dropping one means open it.
+        if path.extension().is_some_and(|e| e == "loom") {
+            self.open_scene(&path.to_string_lossy());
+            return;
+        }
+        if self.session.is_none() || self.play.is_some() {
+            crate::log::warn("stop the game first — importing changes the scene".to_owned());
+            return;
+        }
+        let extension = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        // **What this engine can actually load, and nothing else.** Declaring a
+        // `.fbx` would validate and then fail at mesh-build time, somewhere the
+        // human is no longer looking.
+        let folder = match extension.as_str() {
+            "obj" => "meshes",
+            "png" => "textures",
+            other => {
+                crate::log::warn(format!(
+                    "{other} is not a format this engine reads — .obj for meshes, .png for textures"
+                ));
+                return;
+            }
+        };
+
+        let root = project_root(&self.base);
+        let inside = path.starts_with(&root);
+        let destination = if inside {
+            path.to_path_buf()
+        } else {
+            let directory = root.join("assets").join(folder);
+            if let Err(e) = std::fs::create_dir_all(&directory) {
+                crate::log::error(format!("{}: {e}", directory.display()));
+                return;
+            }
+            let name = path.file_name().unwrap_or_default();
+            let mut target = directory.join(name);
+            // **Never silently overwrite.** Two files called `boat.obj` from two
+            // folders are two models, and the second one landing on the first
+            // would change every scene using the first.
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            let mut n = 1;
+            while target.exists() {
+                n += 1;
+                target = directory.join(format!("{stem}{n}.{extension}"));
+            }
+            if let Err(e) = std::fs::copy(path, &target) {
+                crate::log::error(format!("{}: {e}", path.display()));
+                return;
+            }
+            crate::log::info(format!("copied into {}", target.display()));
+            target
+        };
+
+        // The path a scene stores is relative to the scene, so the project moves
+        // as one directory.
+        let Some(relative) = relative_path(&self.base, &destination) else {
+            crate::log::error("cannot express that path relative to the scene".to_owned());
+            return;
+        };
+        let key = self.free_asset_key(&destination);
+        self.transact(
+            format!("Import {key}"),
+            vec![loom_scene::SceneOp::Declare {
+                kind: "asset".to_owned(),
+                key: key.clone(),
+                id: None,
+                path: relative,
+            }],
+        );
+        crate::log::info(format!("declared `{key}` — it is in the Project panel"));
+    }
+
+    /// An asset alias nothing in this scene is already using.
+    fn free_asset_key(&self, file: &std::path::Path) -> String {
+        let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+        // TOML bare keys, so a file called `my model (2).obj` still declares.
+        let base: String = stem
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .collect();
+        let base = if base.starts_with(|c: char| c.is_ascii_digit()) {
+            format!("a{base}")
+        } else {
+            base
+        };
+        let taken: std::collections::BTreeSet<&str> =
+            self.view.assets.iter().map(String::as_str).collect();
+        if !taken.contains(base.as_str()) {
+            return base;
+        }
+        let mut n = 2;
+        loop {
+            let candidate = format!("{base}{n}");
+            if !taken.contains(candidate.as_str()) {
+                return candidate;
+            }
+            n += 1;
+        }
     }
 
     /// Create a node that draws `shape`, under the selection — ADR 0093.
@@ -4944,6 +5180,76 @@ pub(crate) fn project_root(base: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+
+
+/// One frame's cost, as measured rather than as smoothed — ADR 0106.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FrameSample {
+    /// Input, the step, re-deriving draw calls, the weather, the panels.
+    pub cpu_ms: f32,
+    /// The simulation's own share of that, zero when nothing is playing.
+    pub sim_ms: f32,
+    /// Submitting and presenting.
+    pub draw_ms: f32,
+    /// Wall clock since the previous frame — what the human actually felt.
+    pub total_ms: f32,
+}
+
+/// The last few seconds of frames.
+///
+/// **A fixed ring, because a profiler must not itself be the leak.** Four
+/// seconds at 60 fps is enough to see a hitch and short enough that the graph
+/// is about now rather than about the whole session.
+#[derive(Debug, Default)]
+pub(crate) struct FrameHistory {
+    samples: Vec<FrameSample>,
+    next: usize,
+}
+
+impl FrameHistory {
+    const CAPACITY: usize = 240;
+
+    fn push(&mut self, sample: FrameSample) {
+        if self.samples.len() < Self::CAPACITY {
+            self.samples.push(sample);
+        } else {
+            self.samples[self.next] = sample;
+            self.next = (self.next + 1) % Self::CAPACITY;
+        }
+    }
+
+    /// Oldest first, so the graph reads left to right like time does.
+    fn in_order(&self) -> Vec<FrameSample> {
+        if self.samples.len() < Self::CAPACITY {
+            return self.samples.clone();
+        }
+        let mut out = self.samples[self.next..].to_vec();
+        out.extend_from_slice(&self.samples[..self.next]);
+        out
+    }
+}
+
+/// `to` written relative to `from`, both absolute.
+///
+/// **No dependency for this.** `pathdiff` is a crate; this is the shared-prefix
+/// walk it performs, and the project has spent a lot of care not acquiring
+/// dependencies it can spell in fifteen lines.
+fn relative_path(from: &std::path::Path, to: &std::path::Path) -> Option<String> {
+    let from = std::fs::canonicalize(from).ok()?;
+    // The file exists by now — it was just copied — so canonicalising it is
+    // safe and makes the two sides comparable.
+    let to = std::fs::canonicalize(to).ok()?;
+    let mut common = 0;
+    let a: Vec<_> = from.components().collect();
+    let b: Vec<_> = to.components().collect();
+    while common < a.len() && common < b.len() && a[common] == b[common] {
+        common += 1;
+    }
+    let mut out: Vec<String> = std::iter::repeat_n("..".to_owned(), a.len() - common).collect();
+    out.extend(b[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
+    (!out.is_empty()).then(|| out.join("/"))
+}
+
 /// Every `.loom` under `dir`, depth-limited and blind to build output.
 ///
 /// **A bounded walk, not a full one.** `target/` holds a copy of the asset
@@ -5070,6 +5376,34 @@ mod tests {
         assert!(
             chosen.ends_with("zzz_game.loom"),
             "should prefer the game even though the fixture sorts first: {chosen}"
+        );
+    }
+
+    /// **What a scene stores is relative to the scene** — ADR 0105. An import
+    /// that writes an absolute path produces a scene that works on one machine
+    /// and has nothing for `loom pack` to fold in.
+    #[test]
+    fn an_imported_path_is_written_relative_to_the_scene() {
+        let root = std::env::temp_dir().join("loom-relative-path-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("assets/meshes")).expect("meshes");
+        std::fs::create_dir_all(root.join("assets/test")).expect("scenes");
+        let mesh = root.join("assets/meshes/boat.obj");
+        std::fs::write(&mesh, "o boat\n").expect("mesh");
+
+        // A scene in `assets/test` reaching a mesh in `assets/meshes`.
+        let from = root.join("assets/test");
+        assert_eq!(
+            super::relative_path(&from, &mesh).as_deref(),
+            Some("../meshes/boat.obj")
+        );
+
+        // And one sitting beside it.
+        let beside = root.join("assets/meshes");
+        assert_eq!(
+            super::relative_path(&beside, &mesh).as_deref(),
+            Some("boat.obj"),
+            "no leading ./ for a sibling"
         );
     }
 

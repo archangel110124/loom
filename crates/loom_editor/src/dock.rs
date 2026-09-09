@@ -42,14 +42,19 @@ use loom_render::egui;
 
 use crate::panels::{self, PanelState, UiAction};
 
-/// Every panel the editor has. **Fixed at eleven, once.**
+/// Every panel the editor has.
 ///
-/// Adding a variant later invalidates every saved layout — `egui_dock`'s tree
-/// is persisted by tab identity — so this list is decided in one go rather
-/// than grown. `Environment`, `Terrain`, `Events`, `Profiler` and `Foliage`
-/// were all considered and cut: a tab whose body is empty is worse than no
-/// tab, because it advertises a feature that is not there and it costs a
-/// layout migration to remove.
+/// **This was "fixed at eleven, once", and that was wrong** — the fear was that
+/// adding a variant invalidates every saved layout, since `egui_dock`'s tree is
+/// persisted by tab identity. It does not: layouts are saved as *titles*, an
+/// unknown one is dropped, and `from_json` pushes any tab this build has that
+/// the file lacks. A layout written before a tab existed gains it on the next
+/// load. The rule that survives is the real one — **a tab whose body is empty
+/// is worse than no tab**, because it advertises a feature that is not there.
+///
+/// `Profiler` was on the cut list for that reason and is here now because it
+/// has a body: ADR 0106. `Environment`, `Terrain`, `Events` and `Foliage` still
+/// do not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tab {
     /// The 3D viewport. **Draws nothing** — see the module docs.
@@ -65,11 +70,13 @@ pub enum Tab {
     Transactions,
     Prefabs,
     Agent,
+    /// Where the frame went — ADR 0106.
+    Profiler,
 }
 
 impl Tab {
     /// Every variant, for the Window menu and for layout restoration.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Scene,
         Self::Game,
         Self::Hierarchy,
@@ -81,6 +88,7 @@ impl Tab {
         Self::Transactions,
         Self::Prefabs,
         Self::Agent,
+        Self::Profiler,
     ];
 
     /// The tab's title, and the string a saved layout stores.
@@ -98,6 +106,7 @@ impl Tab {
             Self::Transactions => "Transactions",
             Self::Prefabs => "Prefabs",
             Self::Agent => "Agent",
+            Self::Profiler => "Profiler",
         }
     }
 
@@ -192,6 +201,7 @@ impl TabViewer for Shell<'_, '_> {
             Tab::Hierarchy => panels::hierarchy(ui, self.state, &mut self.actions),
             Tab::Inspector => panels::inspector(ui, self.state, &mut self.actions),
             Tab::Project => panels::assets(ui, self.state, &mut self.actions),
+            Tab::Profiler => panels::profiler(ui, self.state),
             Tab::Console => panels::console_column(ui, self.state.console, &mut self.actions),
             Tab::Transactions => panels::transactions(ui, self.state.history),
             // All eleven have bodies now — ADR 0093. The variants were fixed
@@ -277,6 +287,7 @@ fn default_layout(height: f32) -> DockState<Tab> {
             Tab::History,
             Tab::Transactions,
             Tab::Agent,
+            Tab::Profiler,
         ],
     );
     let [upper, _left] = surface.split_left(upper, LEFT_FRACTION, vec![Tab::Hierarchy]);
@@ -549,17 +560,37 @@ fn from_json(text: &str, height: f32) -> DockState<Tab> {
 mod tests {
     use super::{
         BOTTOM_HEIGHT, Dock, LEFT_FRACTION, PanelState, RIGHT_FRACTION, Tab, default_layout,
-        egui, from_json,
+        egui, for_saving, from_json,
     };
     use egui_dock::{DockState, Node, NodeIndex};
 
-    /// **Eleven, and the count is the assertion.** A twelfth variant added
-    /// later invalidates every saved layout, so this failing is the reminder
-    /// that adding one is a migration rather than an edit.
+    /// **This used to assert the count was eleven**, as a reminder that adding a
+    /// twelfth was a migration rather than an edit. The premise was wrong: a
+    /// layout is saved as titles, an unknown one is dropped, and `from_json`
+    /// backfills any tab this build has that the file lacks. So the count was
+    /// never the invariant — *this* is, and it is what makes adding a tab safe.
     #[test]
-    fn the_tab_list_is_fixed_at_eleven_ending_in_agent() {
-        assert_eq!(Tab::ALL.len(), 11);
-        assert_eq!(*Tab::ALL.last().unwrap(), Tab::Agent);
+    fn a_layout_saved_without_a_tab_gains_it_on_load() {
+        let saved = for_saving(&default_layout(220.0));
+        // A file from a build that had never heard of the Profiler.
+        let older = saved.filter_map_tabs(|title| {
+            (title != Tab::Profiler.title()).then(|| title.clone())
+        });
+        let text = serde_json::to_string(&older).expect("a layout serialises");
+        assert!(
+            !text.contains(Tab::Profiler.title()),
+            "the fixture must actually be missing the tab"
+        );
+
+        let loaded = from_json(&text, 220.0);
+
+        assert!(
+            loaded.find_tab(&Tab::Profiler).is_some(),
+            "a tab this build has must come back somewhere visible"
+        );
+        for tab in Tab::ALL {
+            assert!(loaded.find_tab(&tab).is_some(), "{} went missing", tab.title());
+        }
     }
 
     /// Titles are the persistence format, so they must round-trip and must be
@@ -572,7 +603,7 @@ mod tests {
             assert!(seen.insert(tab.title()), "duplicate title {}", tab.title());
             assert_eq!(Tab::from_title(tab.title()), Some(tab));
         }
-        assert_eq!(seen.len(), 11);
+        assert_eq!(seen.len(), Tab::ALL.len());
     }
 
     /// A title from a newer build is dropped rather than fatal.
@@ -789,6 +820,8 @@ mod tests {
                 agent_log: &agent_log,
                 agent_chat: &[],
                 agent_proposals: &[],
+                frames: &[],
+                copied_component: None,
                 agent_busy: false,
                 redo_history: &redo,
                 scene: &scene,
@@ -852,6 +885,8 @@ mod tests {
                 agent_log: &[],
             agent_chat: &[],
             agent_proposals: &[],
+            frames: &[],
+            copied_component: None,
             agent_busy: false,
                 redo_history: &[],
                 scene: &scene,
@@ -914,6 +949,8 @@ mod tests {
             agent_log: &[],
             agent_chat: &[],
             agent_proposals: &[],
+            frames: &[],
+            copied_component: None,
             agent_busy: false,
             redo_history: &[],
             scene: &scene,
