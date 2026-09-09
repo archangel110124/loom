@@ -72,11 +72,13 @@ pub enum Tab {
     Agent,
     /// Where the frame went — ADR 0106.
     Profiler,
+    /// The `.rhai` behind the selection — behaviour and animation both — ADR 0109.
+    Script,
 }
 
 impl Tab {
     /// Every variant, for the Window menu and for layout restoration.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Scene,
         Self::Game,
         Self::Hierarchy,
@@ -89,6 +91,7 @@ impl Tab {
         Self::Prefabs,
         Self::Agent,
         Self::Profiler,
+        Self::Script,
     ];
 
     /// The tab's title, and the string a saved layout stores.
@@ -107,6 +110,7 @@ impl Tab {
             Self::Prefabs => "Prefabs",
             Self::Agent => "Agent",
             Self::Profiler => "Profiler",
+            Self::Script => "Script",
         }
     }
 
@@ -202,6 +206,7 @@ impl TabViewer for Shell<'_, '_> {
             Tab::Inspector => panels::inspector(ui, self.state, &mut self.actions),
             Tab::Project => panels::assets(ui, self.state, &mut self.actions),
             Tab::Profiler => panels::profiler(ui, self.state),
+            Tab::Script => panels::script(ui, self.state, &mut self.actions),
             Tab::Console => panels::console_column(ui, self.state.console, &mut self.actions),
             Tab::Transactions => panels::transactions(ui, self.state.history),
             // All eleven have bodies now — ADR 0093. The variants were fixed
@@ -288,6 +293,7 @@ fn default_layout(height: f32) -> DockState<Tab> {
             Tab::Transactions,
             Tab::Agent,
             Tab::Profiler,
+            Tab::Script,
         ],
     );
     let [upper, _left] = surface.split_left(upper, LEFT_FRACTION, vec![Tab::Hierarchy]);
@@ -822,6 +828,11 @@ mod tests {
                 agent_proposals: &[],
                 frames: &[],
                 copied_component: None,
+                scripts: &[],
+                open_script: None,
+                script_source: "",
+                script_error: None,
+                script_dirty: false,
                 agent_busy: false,
                 redo_history: &redo,
                 scene: &scene,
@@ -887,6 +898,11 @@ mod tests {
             agent_proposals: &[],
             frames: &[],
             copied_component: None,
+            scripts: &[],
+            open_script: None,
+            script_source: "",
+            script_error: None,
+            script_dirty: false,
             agent_busy: false,
                 redo_history: &[],
                 scene: &scene,
@@ -951,6 +967,11 @@ mod tests {
             agent_proposals: &[],
             frames: &[],
             copied_component: None,
+            scripts: &[],
+            open_script: None,
+            script_source: "",
+            script_error: None,
+            script_dirty: false,
             agent_busy: false,
             redo_history: &[],
             scene: &scene,

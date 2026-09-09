@@ -872,6 +872,15 @@ struct App {
     fluid_draw_ms: (f64, f64, f64),
     /// The last few seconds of frame costs, for the Profiler tab — ADR 0106.
     frames: FrameHistory,
+    /// The `.rhai` open in the Script tab, its buffer, and why it was refused —
+    /// ADR 0109. The buffer lives here rather than in the panel because a panel
+    /// is a pure function of what it is handed; the text between opening a file
+    /// and saving it is exactly the state that has nowhere else to go.
+    open_script: Option<std::path::PathBuf>,
+    script_source: String,
+    script_on_disk: String,
+    script_error: Option<(String, Option<usize>)>,
+    scripts: Vec<String>,
     /// A component's values, remembered for pasting onto another node —
     /// ADR 0107. The type name and the whole table, because a partial paste
     /// would leave the target reading as neither one thing nor the other.
@@ -1053,6 +1062,11 @@ impl App {
             wall_last: None,
             fluid_draw_ms: (0.0, 0.0, 0.0),
             frames: FrameHistory::default(),
+            open_script: None,
+            script_source: String::new(),
+            script_on_disk: String::new(),
+            script_error: None,
+            scripts: Vec::new(),
             component_clipboard: None,
             fluid_draw_frames: 0,
             agent_changes: Vec::new(),
@@ -1214,6 +1228,7 @@ impl App {
         self.recompute_problems();
         self.recompute_prefabs();
         self.scenes = self.sibling_scenes();
+        self.scripts = self.project_scripts();
         // Grass is placed from the scene the same way the meshes are, so a
         // reload has to re-place it or the window keeps showing the old field.
         self.upload_grass();
@@ -1758,6 +1773,24 @@ impl ApplicationHandler for App {
                 if std::mem::take(&mut self.drag_dirty) {
                     self.drag_gizmo();
                 }
+                // **The selection opens its own script**, so clicking the
+                // deckhand's elbow shows the code that bends it — which is the
+                // whole reason animation and scripting are one tab here
+                // (ADR 0109). Only while the buffer matches the file: taking an
+                // unsaved edit away because the selection moved would lose
+                // work, and the Hierarchy is one stray click from anywhere.
+                //
+                // Here rather than beside the panel state because the borrows
+                // that build a frame are live by then, and because this is a
+                // consequence of the selection rather than of drawing.
+                if self.script_source == self.script_on_disk
+                    && let Some(named) = self.selected_script()
+                {
+                    let full = self.base.join(&named);
+                    if self.open_script.as_deref() != Some(full.as_path()) {
+                        self.open_script(std::path::Path::new(&named));
+                    }
+                }
                 // See the note in `App::new` — presentation, not simulation.
                 #[allow(clippy::disallowed_methods)]
                 let now = std::time::Instant::now();
@@ -2063,6 +2096,10 @@ impl ApplicationHandler for App {
                         total_ms: f.total_ms,
                     })
                     .collect();
+                let open_script = self
+                    .open_script
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned());
                 let state = PanelState {
                     rings: &self.rings,
                     planes: &self.planes,
@@ -2083,6 +2120,14 @@ impl ApplicationHandler for App {
                         .component_clipboard
                         .as_ref()
                         .map(|(name, _)| name.as_str()),
+                    scripts: &self.scripts,
+                    open_script: open_script.as_deref(),
+                    script_source: &self.script_source,
+                    script_error: self
+                        .script_error
+                        .as_ref()
+                        .map(|(message, line)| (message.as_str(), *line)),
+                    script_dirty: self.script_source != self.script_on_disk,
                     agent_busy: self.agent_busy,
                     redo_history: self
                         .session
@@ -2720,6 +2765,9 @@ impl App {
             UiAction::OpenScene(path) => self.open_scene(&path),
             UiAction::SendToAgent(text) => self.ask_agent(&text),
             UiAction::DecideProposal { id, apply } => self.decide_proposal(id, apply),
+            UiAction::OpenScript(path) => self.open_script(std::path::Path::new(&path)),
+            UiAction::EditScript { source, .. } => self.script_source = source,
+            UiAction::SaveScript { path, source } => self.save_script(&path, &source),
             UiAction::CopyComponent(node, component) => self.copy_component(&node, &component),
             UiAction::PasteComponent(node) => self.paste_component(&node),
             UiAction::DropAsset { alias, at } => self.drop_asset(&alias, at),
@@ -3589,6 +3637,78 @@ impl App {
         self.agent_changes.clear();
         self.show(&text);
         crate::log::info(format!("opened {}", path.display()));
+    }
+
+    /// Open a `.rhai` in the Script tab — ADR 0109.
+    fn open_script(&mut self, path: &std::path::Path) {
+        // Relative to the scene, the way a component's `path` field is written.
+        let full = if path.is_absolute() || path.exists() {
+            path.to_path_buf()
+        } else {
+            self.base.join(path)
+        };
+        match std::fs::read_to_string(&full) {
+            Ok(text) => {
+                self.script_on_disk.clone_from(&text);
+                self.script_source = text;
+                self.open_script = Some(full);
+                self.script_error = None;
+            }
+            Err(e) => crate::log::error(format!("{}: {e}", full.display())),
+        }
+    }
+
+    /// Compile, then write — ADR 0109.
+    ///
+    /// **Nothing reaches disk that will not parse.** `ScriptHost::compile` is
+    /// the parser the runner uses, so the error a save catches is the same error
+    /// the next Play would have raised — with its line, while the human is
+    /// looking at the code, instead of as a console warning and a paused
+    /// simulation minutes later.
+    fn save_script(&mut self, path: &str, source: &str) {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        if let Some((message, line)) = script_refusal(name, source) {
+            crate::log::warn(format!("{name}: {message} — not written"));
+            self.script_error = Some((message, line));
+            return;
+        }
+        match std::fs::write(path, source) {
+            Ok(()) => {
+                self.script_on_disk = source.to_owned();
+                self.script_error = None;
+                crate::log::info(format!("saved {name}"));
+                // **A running game keeps the script it started with.** Reloading
+                // mid-run would change the rules under a simulation whose whole
+                // value is that its history is reproducible (ADR 0045). Play
+                // again and the new one is loaded.
+                if self.play.is_some() {
+                    crate::log::info("stop and play again to run the new script".to_owned());
+                }
+            }
+            Err(e) => {
+                self.script_error = Some((e.to_string(), None));
+                crate::log::error(format!("{path}: {e}"));
+            }
+        }
+    }
+
+    /// Every `.rhai` under the project root, for the Script tab's picker.
+    fn project_scripts(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        walk_for(&project_root(&self.base), "rhai", 0, &mut found);
+        found.sort();
+        found
+    }
+
+    /// The script the selection names, if it names one.
+    fn selected_script(&self) -> Option<String> {
+        self.selected.iter().find_map(|path| {
+            let node = self.view.scene.nodes().iter().find(|n| &n.path == path)?;
+            ["Script", "GameRules"].iter().find_map(|component| {
+                let named = node.components.get(*component)?.get("path")?.as_str()?;
+                (!named.is_empty()).then(|| named.to_owned())
+            })
+        })
     }
 
     /// Remember a component's values — ADR 0107.
@@ -5126,6 +5246,7 @@ pub fn run(
     app.recompute_problems();
     app.recompute_prefabs();
     app.scenes = app.sibling_scenes();
+    app.scripts = app.project_scripts();
     app.refresh_agent_chat();
     if let Some(wanted) = script.mode.as_deref() {
         app.mode = match wanted.to_ascii_lowercase().as_str() {
@@ -5384,6 +5505,23 @@ fn gltf_sidecars(path: &std::path::Path) -> Vec<String> {
     found
 }
 
+
+/// Why this script will not compile, if it will not — ADR 0109.
+///
+/// **The parser the runner uses, run at save time.** A syntax error caught here
+/// carries its line and arrives while the human is looking at the code; the same
+/// error caught at the next Play arrives as a console warning and a paused
+/// simulation, and by then the edit is on disk and the scene is the thing that
+/// looks broken.
+///
+/// `None` when it compiles, which is the only case that writes.
+fn script_refusal(name: &str, source: &str) -> Option<(String, Option<usize>)> {
+    loom_script::ScriptHost::default()
+        .compile(name, source)
+        .err()
+        .map(|e| (e.message, e.line))
+}
+
 /// `to` written relative to `from`, both absolute.
 ///
 /// **No dependency for this.** `pathdiff` is a crate; this is the shared-prefix
@@ -5412,6 +5550,16 @@ fn relative_path(from: &std::path::Path, to: &std::path::Path) -> Option<String>
 /// stops a symlink loop from hanging the editor on a directory nobody meant
 /// to scan.
 pub(crate) fn walk_for_scenes(dir: &std::path::Path, depth: u32, found: &mut Vec<String>) {
+    walk_for(dir, "loom", depth, found);
+}
+
+/// As [`walk_for_scenes`], for any extension — the Script tab wants `rhai`.
+pub(crate) fn walk_for(
+    dir: &std::path::Path,
+    extension: &str,
+    depth: u32,
+    found: &mut Vec<String>,
+) {
     const MAX_DEPTH: u32 = 6;
     const MAX_SCENES: usize = 512;
     if depth > MAX_DEPTH || found.len() >= MAX_SCENES {
@@ -5428,8 +5576,8 @@ pub(crate) fn walk_for_scenes(dir: &std::path::Path, depth: u32, found: &mut Vec
             if name.starts_with('.') || name == "target" || name == "node_modules" {
                 continue;
             }
-            walk_for_scenes(&path, depth + 1, found);
-        } else if path.extension().is_some_and(|e| e == "loom")
+            walk_for(&path, extension, depth + 1, found);
+        } else if path.extension().is_some_and(|e| e == extension)
             && let Some(text) = path.to_str()
         {
             found.push(text.to_owned());
@@ -5615,6 +5763,27 @@ mod tests {
             vec!["model.bin".to_owned(), "wood.png".to_owned()],
             "only the relative, flat, not-already-listed files"
         );
+    }
+
+    /// **A script that will not parse must not reach disk** — ADR 0109.
+    ///
+    /// The failure this closes is quiet: an editor that writes whatever is in
+    /// the buffer leaves a scene that loads, plays, and then pauses with a
+    /// console line somebody has to go and find. The parse error belongs where
+    /// the code is.
+    #[test]
+    fn a_script_that_does_not_compile_is_refused_with_its_line() {
+        // Valid: the shape every joint script in this repository has.
+        assert_eq!(
+            super::script_refusal("ok.rhai", "let g = 0.0;\nrotation = [g, 0.0, 0.0];\n"),
+            None,
+            "a script that parses must be written"
+        );
+
+        let (message, line) = super::script_refusal("bad.rhai", "let g = 0.0;\nlet = ;\n")
+            .expect("a syntax error must be refused");
+        assert!(!message.is_empty(), "a refusal with no message helps nobody");
+        assert_eq!(line, Some(2), "the line is the point: {message}");
     }
 
     /// **What a scene stores is relative to the scene** — ADR 0105. An import

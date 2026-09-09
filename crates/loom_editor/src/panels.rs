@@ -62,6 +62,12 @@ pub enum UiAction {
     OpenScene(String),
     /// Ask the agent for something — ADR 0100.
     SendToAgent(String),
+    /// Open a `.rhai` in the Script tab — ADR 0109.
+    OpenScript(String),
+    /// Compile-check and write the script being edited.
+    SaveScript { path: String, source: String },
+    /// The buffer changed. The panel holds no state, so the caller keeps it.
+    EditScript { path: String, source: String },
     /// Apply or throw away a change the agent offered rather than made —
     /// ADR 0103. Apply runs the stored transaction through the ordinary op
     /// path, so it is one History entry and one Ctrl+Z like any other edit.
@@ -282,6 +288,15 @@ pub struct PanelState<'a> {
     pub frames: &'a [FrameCost],
     /// The type name of the copied component, if there is one — ADR 0107.
     pub copied_component: Option<&'a str>,
+    /// Every `.rhai` in the project, for the Script tab's picker — ADR 0109.
+    pub scripts: &'a [String],
+    /// The script open in the Script tab, and its text.
+    pub open_script: Option<&'a str>,
+    pub script_source: &'a str,
+    /// Why the last save or the last run refused it: message, and 1-based line.
+    pub script_error: Option<(&'a str, Option<usize>)>,
+    /// True while the open script differs from the file on disk.
+    pub script_dirty: bool,
     /// Labels of transactions that were undone and can be redone, newest last.
     pub redo_history: &'a [String],
     /// The selection's bounding box, as screen-space edges — ADR 0099.
@@ -1345,6 +1360,132 @@ pub(crate) fn profiler(ui: &mut egui::Ui, state: &PanelState<'_>) {
         ui.weak("·");
         ui.weak(format!("{} draws", state.object_count));
     });
+        });
+}
+
+/// The script the scene is running, editable — ADR 0109.
+///
+/// **Animation lives here too.** ADR 0072 made a character separate rigid parts
+/// animated by `rhai` writing absolute rotations on the fixed step, so there is
+/// no clip, no curve and no timeline to edit — the walk cycle *is*
+/// `deckhand_gait.rhai`. A text editor over these files is therefore both the
+/// scripting tool and the animation tool, which is why it comes first.
+///
+/// **A save compiles before it writes.** `ScriptHost::compile` is the same
+/// parser the runner uses, so a syntax error is caught here, with its line,
+/// while the human is looking at the code — rather than at the next Play, as a
+/// console line and a paused simulation. Nothing reaches disk until it parses.
+pub(crate) fn script(ui: &mut egui::Ui, state: &PanelState<'_>, actions: &mut Vec<UiAction>) {
+    ui.horizontal(|ui| {
+        ui.heading("Script");
+        match state.open_script {
+            Some(path) => {
+                ui.label(egui::RichText::new(path.rsplit('/').next().unwrap_or(path)).monospace());
+                if state.script_dirty {
+                    ui.colored_label(crate::theme::tokens(false).warn, "unsaved");
+                }
+            }
+            None => {
+                ui.weak("nothing open").on_hover_text(
+                    "select a node with a `Script` or `GameRules` component, or pick one below",
+                );
+            }
+        }
+    });
+    ui.separator();
+
+    // The picker, always available: a node names one script, and a project has
+    // thirty. Filtered, because it is the same wall the scene list was.
+    let id = ui.id().with("script_filter");
+    let mut needle: String = ui.data(|d| d.get_temp(id).unwrap_or_default());
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut needle)
+                    .hint_text("open a script…")
+                    .desired_width(200.0),
+            )
+            .changed()
+        {
+            ui.data_mut(|d| d.insert_temp(id, needle.clone()));
+        }
+        if let Some(path) = state.open_script
+            && ui
+                .add_enabled(state.script_dirty, egui::Button::new("Save"))
+                .on_hover_text("compiles first — nothing is written if it does not parse")
+                .clicked()
+        {
+            actions.push(UiAction::SaveScript {
+                path: path.to_owned(),
+                source: state.script_source.to_owned(),
+            });
+        }
+    });
+    let lowered = needle.to_lowercase();
+    if !lowered.is_empty() {
+        egui::ScrollArea::vertical()
+            .id_salt("script_picker")
+            .max_height(110.0)
+            .show(ui, |ui| {
+                for path in state.scripts {
+                    if !path.to_lowercase().contains(&lowered) {
+                        continue;
+                    }
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    if ui.selectable_label(state.open_script == Some(path), name).clicked() {
+                        actions.push(UiAction::OpenScript(path.clone()));
+                        ui.data_mut(|d| d.remove::<String>(id));
+                    }
+                }
+            });
+        ui.separator();
+    }
+
+    // **The error, above the code and not below it.** A parse failure names a
+    // line, and a line number under a scroll area you have to reach the bottom
+    // of to see is a line number nobody reads.
+    if let Some((message, line)) = state.script_error {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let tokens = crate::theme::tokens(false);
+                match line {
+                    Some(n) => ui.colored_label(tokens.error, format!("line {n}")),
+                    None => ui.colored_label(tokens.error, "refused"),
+                };
+                ui.label(message);
+            });
+        });
+        ui.add_space(4.0);
+    }
+
+    if state.open_script.is_none() {
+        ui.weak("Scripts are where behaviour and animation both live — a joint's");
+        ui.weak("rotation per tick, the rules of the game, a boat's patrol.");
+        return;
+    }
+
+    let mut source = state.script_source.to_owned();
+    egui::ScrollArea::vertical()
+        .id_salt("script_source")
+        .show(ui, |ui| {
+            let editor = ui.add(
+                egui::TextEdit::multiline(&mut source)
+                    .code_editor()
+                    .desired_rows(24)
+                    .desired_width(f32::INFINITY),
+            );
+            if editor.changed()
+                && let Some(path) = state.open_script
+            {
+                // Every keystroke is an edit to the buffer, not to the file —
+                // `SaveScript` is the only thing that writes, and it compiles
+                // first. Held in the caller so the panel stays a pure function
+                // of what it is handed.
+                actions.push(UiAction::EditScript {
+                    path: path.to_owned(),
+                    source: source.clone(),
+                });
+            }
         });
 }
 
@@ -3401,6 +3542,11 @@ mod tests {
             agent_proposals: &[],
             frames: &[],
             copied_component: None,
+            scripts: &[],
+            open_script: None,
+            script_source: "",
+            script_error: None,
+            script_dirty: false,
             agent_busy: false,
             renaming: None,
             redo_history: &[],
@@ -3471,6 +3617,11 @@ mod tests {
             agent_proposals: &[],
             frames: &[],
             copied_component: None,
+            scripts: &[],
+            open_script: None,
+            script_source: "",
+            script_error: None,
+            script_dirty: false,
             agent_busy: false,
             renaming: None,
             redo_history: &[],
