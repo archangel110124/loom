@@ -313,7 +313,206 @@ pub fn import_obj_object(
 ///
 /// # Errors
 /// [`AssetError`] if the file cannot be read or contains no triangles.
+/// A 4x4 with nothing in it but the diagonal, column-major as glTF writes them.
+const IDENTITY: [[f32; 4]; 4] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
+
+/// `a * b`, both column-major.
+fn multiply(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0; 4]; 4];
+    for (column, source) in out.iter_mut().zip(b.iter()) {
+        for (row, slot) in column.iter_mut().enumerate() {
+            *slot = (0..4).map(|k| a[k][row] * source[k]).sum();
+        }
+    }
+    out
+}
+
+/// A point through a column-major 4x4.
+fn transform_point(m: [[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
+    let mut out = [0.0; 3];
+    for (row, slot) in out.iter_mut().enumerate() {
+        *slot = m[3][row] + (0..3).map(|k| m[k][row] * p[k]).sum::<f32>();
+    }
+    out
+}
+
+/// A normal through the **cofactor** of the upper 3x3.
+///
+/// **Not the matrix itself.** A non-uniform scale tilts a normal the wrong way
+/// under the plain transform — squash a sphere and its normals stop being
+/// perpendicular to it, which reads as broken lighting rather than as a broken
+/// import. The correct transform is the inverse transpose, and for a direction
+/// the determinant is a scale factor that renormalising throws away anyway, so
+/// the cofactor matrix is the whole of it and needs no division.
+fn transform_normal(m: [[f32; 4]; 4], n: [f32; 3]) -> [f32; 3] {
+    let c = |a: usize, b: usize| m[a][b];
+    let cofactor = [
+        [
+            c(1, 1) * c(2, 2) - c(1, 2) * c(2, 1),
+            c(1, 2) * c(2, 0) - c(1, 0) * c(2, 2),
+            c(1, 0) * c(2, 1) - c(1, 1) * c(2, 0),
+        ],
+        [
+            c(0, 2) * c(2, 1) - c(0, 1) * c(2, 2),
+            c(0, 0) * c(2, 2) - c(0, 2) * c(2, 0),
+            c(0, 1) * c(2, 0) - c(0, 0) * c(2, 1),
+        ],
+        [
+            c(0, 1) * c(1, 2) - c(0, 2) * c(1, 1),
+            c(0, 2) * c(1, 0) - c(0, 0) * c(1, 2),
+            c(0, 0) * c(1, 1) - c(0, 1) * c(1, 0),
+        ],
+    ];
+    let mut out = [0.0; 3];
+    for (row, slot) in out.iter_mut().enumerate() {
+        *slot = (0..3).map(|k| cofactor[k][row] * n[k]).sum();
+    }
+    let length = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2]).sqrt();
+    if length > f32::EPSILON {
+        for slot in &mut out {
+            *slot /= length;
+        }
+    }
+    out
+}
+
+/// Is this node, or anything under it, the one named?
+fn subtree_named(node: &gltf::Node<'_>, wanted: &str) -> bool {
+    node.name() == Some(wanted) || node.children().any(|child| subtree_named(&child, wanted))
+}
+
+/// Add a node's mesh and everything under it, in world space.
+fn add_node(
+    mesh: &mut Mesh,
+    node: &gltf::Node<'_>,
+    parent: [[f32; 4]; 4],
+    buffers: &[gltf::buffer::Data],
+) {
+    let here = multiply(parent, node.transform().matrix());
+    if let Some(gltf_mesh) = node.mesh() {
+        add_primitives(mesh, &gltf_mesh, here, buffers);
+    }
+    for child in node.children() {
+        add_node(mesh, &child, here, buffers);
+    }
+}
+
+/// Every triangle primitive of one glTF mesh, baked through `transform`.
+fn add_primitives(
+    mesh: &mut Mesh,
+    gltf_mesh: &gltf::Mesh<'_>,
+    transform: [[f32; 4]; 4],
+    buffers: &[gltf::buffer::Data],
+) {
+    for primitive in gltf_mesh.primitives() {
+        if primitive.mode() != gltf::mesh::Mode::Triangles {
+            // Points and lines are legal glTF and meaningless to a triangle
+            // renderer. Skipped, not an error.
+            continue;
+        }
+        let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
+        let Some(positions) = reader.read_positions() else {
+            continue;
+        };
+        let positions: Vec<[f32; 3]> =
+            positions.map(|p| transform_point(transform, p)).collect();
+
+        // UV set 0. A glTF may carry several, and may carry none at all — an
+        // untextured mesh legitimately has no unwrap. Missing UVs become
+        // `[0, 0]`, which a material can still handle by asking for triplanar
+        // projection instead.
+        let uvs: Vec<[f32; 2]> = reader
+            .read_tex_coords(0)
+            .map_or_else(Vec::new, |t| t.into_f32().collect());
+        let indices: Vec<u32> = match reader.read_indices() {
+            Some(indices) => indices.into_u32().collect(),
+            // Non-indexed primitives are legal: the vertices are the triangle
+            // list.
+            None => (0..u32::try_from(positions.len()).unwrap_or(0)).collect(),
+        };
+
+        let normals: Option<Vec<[f32; 3]>> = reader
+            .read_normals()
+            .map(|n| n.map(|v| transform_normal(transform, v)).collect());
+
+        match normals {
+            Some(normals) => {
+                let base = u32::try_from(mesh.vertices.len()).unwrap_or(0);
+                for (i, position) in positions.iter().enumerate() {
+                    mesh.vertices.push(Vertex::with_uv(
+                        *position,
+                        normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+                        uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                    ));
+                }
+                mesh.indices.extend(indices.into_iter().map(|i| i + base));
+            }
+            // **Flat normals, computed** — the spec's rule when `NORMAL` is
+            // absent, and what the comment here used to claim while the code
+            // filled a constant `[0, 1, 0]`. Every face lit as though it faced
+            // up; a wall was as bright as a floor. Computing them means each
+            // triangle gets its own three vertices, which is what a flat-shaded
+            // mesh is.
+            None => {
+                for triangle in indices.chunks_exact(3) {
+                    let corners: Vec<[f32; 3]> = triangle
+                        .iter()
+                        .filter_map(|i| positions.get(*i as usize).copied())
+                        .collect();
+                    let [a, b, c] = corners[..] else { continue };
+                    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                    let mut n = [
+                        u[1] * v[2] - u[2] * v[1],
+                        u[2] * v[0] - u[0] * v[2],
+                        u[0] * v[1] - u[1] * v[0],
+                    ];
+                    let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    if length > f32::EPSILON {
+                        for slot in &mut n {
+                            *slot /= length;
+                        }
+                    } else {
+                        // A degenerate triangle has no normal to compute. Up is
+                        // as good as anything and keeps the face in the mesh.
+                        n = [0.0, 1.0, 0.0];
+                    }
+                    for (corner, index) in corners.iter().zip(triangle) {
+                        let next = u32::try_from(mesh.vertices.len()).unwrap_or(0);
+                        mesh.vertices.push(Vertex::with_uv(
+                            *corner,
+                            n,
+                            uvs.get(*index as usize).copied().unwrap_or([0.0, 0.0]),
+                        ));
+                        mesh.indices.push(next);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn import_gltf(path: &std::path::Path) -> Result<Mesh, AssetError> {
+    import_gltf_object(path, None)
+}
+
+/// As [`import_gltf`], taking only the node named by a `#fragment`.
+///
+/// **The same shape `import_obj_object` has**, because the problem is the same:
+/// an exported file is usually a library of things rather than one thing, and a
+/// `MeshRenderer` names one mesh.
+///
+/// # Errors
+/// [`AssetError`] if the file cannot be read, or the named node is not in it.
+pub fn import_gltf_object(
+    path: &std::path::Path,
+    object: Option<&str>,
+) -> Result<Mesh, AssetError> {
     let (document, buffers, _images) =
         gltf::import(path).map_err(|e| AssetError::Gltf(e.to_string()))?;
 
@@ -326,61 +525,45 @@ pub fn import_gltf(path: &std::path::Path) -> Result<Mesh, AssetError> {
         ..Mesh::default()
     };
 
-    for gltf_mesh in document.meshes() {
-        for primitive in gltf_mesh.primitives() {
-            if primitive.mode() != gltf::mesh::Mode::Triangles {
-                // Points and lines are legal glTF and meaningless to a
-                // triangle renderer. Skipped, not an error.
-                continue;
+    // **The scene graph, not the mesh list** — a glTF places its meshes with
+    // node transforms and may instance one mesh many times. Iterating
+    // `document.meshes()` discarded all of it: a file with one pyramid mesh
+    // instanced by two nodes three metres apart imported as *one* pyramid at
+    // the origin, and every mesh in the file was merged whether or not a scene
+    // referenced it. That is wrong for any real export — Blender writes a node
+    // per object — and it was wrong quietly, which is worse.
+    //
+    // Flattened into one mesh, Unity-style, because a `MeshRenderer` names one
+    // mesh. `#Name` selects a single node's subtree instead, mirroring
+    // `import_obj_object`'s fragment.
+    let scene = document
+        .default_scene()
+        .or_else(|| document.scenes().next());
+    match scene {
+        Some(scene) => {
+            for node in scene.nodes() {
+                if let Some(wanted) = object
+                    && !subtree_named(&node, wanted)
+                {
+                    continue;
+                }
+                add_node(&mut mesh, &node, IDENTITY, &buffers);
             }
-            let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
-            let Some(positions) = reader.read_positions() else {
-                continue;
-            };
-            let positions: Vec<[f32; 3]> = positions.collect();
-
-            // A glTF file may omit normals; the spec says to compute flat
-            // normals in that case, so a missing-normals file must still
-            // render rather than being rejected.
-            let normals: Vec<[f32; 3]> = reader
-                .read_normals()
-                .map_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()], Iterator::collect);
-
-            // UV set 0. A glTF may carry several, and may carry none at all —
-            // an untextured mesh legitimately has no unwrap. Missing UVs
-            // become `[0, 0]`, which a material can still handle by asking
-            // for triplanar projection instead.
-            let uvs: Vec<[f32; 2]> = reader
-                .read_tex_coords(0)
-                .map_or_else(Vec::new, |t| t.into_f32().collect());
-
-            let base = u32::try_from(mesh.vertices.len()).unwrap_or(0);
-            for (i, position) in positions.iter().enumerate() {
-                mesh.vertices.push(Vertex::with_uv(
-                    *position,
-                    normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
-                    uvs.get(i).copied().unwrap_or([0.0, 0.0]),
-                ));
-            }
-
-            match reader.read_indices() {
-                Some(indices) => mesh
-                    .indices
-                    .extend(indices.into_u32().map(|i| i + base)),
-                // Non-indexed primitives are legal: the vertices are the
-                // triangle list.
-                None => mesh
-                    .indices
-                    .extend((0..positions.len()).map(|i| base + u32::try_from(i).unwrap_or(0))),
+        }
+        // A document with no scene at all is not something glTF promises, but
+        // it is something exporters emit. Its meshes are all there is.
+        None => {
+            for gltf_mesh in document.meshes() {
+                add_primitives(&mut mesh, &gltf_mesh, IDENTITY, &buffers);
             }
         }
     }
 
     if mesh.indices.is_empty() {
-        return Err(AssetError::Unsupported(format!(
-            "{}: no triangles",
-            path.display()
-        )));
+        return Err(AssetError::Unsupported(match object {
+            Some(name) => format!("{}: no node named `{name}` with triangles", path.display()),
+            None => format!("{}: no triangles", path.display()),
+        }));
     }
     mesh.validate()?;
     Ok(mesh)
@@ -447,5 +630,58 @@ mod gltf_tests {
         let (min, max) = mesh.bounds();
         assert!((max[1] - 1.2).abs() < 1e-5, "apex at {}", max[1]);
         assert!((min[1] - -0.6).abs() < 1e-5, "base at {}", min[1]);
+    }
+
+    /// **Node transforms are baked, and one mesh instanced twice is two.**
+    ///
+    /// This walked `document.meshes()` and never looked at the scene graph, so
+    /// a file placing one pyramid mesh at two nodes three metres apart imported
+    /// as a single pyramid at the origin — every transform discarded, every
+    /// instance collapsed. Blender writes a node per object, so that is wrong
+    /// for essentially every real export, and it was wrong silently.
+    #[test]
+    fn node_transforms_and_instancing_survive_the_import() {
+        let path = std::path::Path::new("../../assets/test/gltf/two_pyramids.gltf");
+        let mesh = import_gltf(path).expect("fixture should import");
+
+        assert_eq!(mesh.indices.len(), 36, "two instances of six triangles");
+        let (min, max) = mesh.bounds();
+        // The nodes sit at x = -3 and x = +3, and the pyramid is 2 wide, so the
+        // pair spans -4..4. Merged at the origin it would span -1..1.
+        assert!(min[0] < -3.5, "left instance is missing: min x {}", min[0]);
+        assert!(max[0] > 3.5, "right instance is missing: max x {}", max[0]);
+        // Height is unchanged: a translation moves, it does not stretch.
+        assert!((max[1] - 1.2).abs() < 1e-5, "apex at {}", max[1]);
+    }
+
+    /// A `#fragment` takes one node out of a file, the same way `.obj#Name`
+    /// does. A file is usually a library of things and a `MeshRenderer` names
+    /// one thing.
+    #[test]
+    fn a_fragment_selects_one_node() {
+        let path = std::path::Path::new("../../assets/test/gltf/two_pyramids.gltf");
+        let left = import_gltf_object(path, Some("Left")).expect("Left exists");
+
+        assert_eq!(left.indices.len(), 18, "one instance, not both");
+        let (min, max) = left.bounds();
+        assert!(max[0] < 0.0, "took the wrong instance: spans {min:?}..{max:?}");
+
+        let missing = import_gltf_object(path, Some("Nope"));
+        assert!(missing.is_err(), "a name that is not there must not import the lot");
+    }
+
+    /// **A `.glb` is the format anything real ships in** — one file, no
+    /// sidecars — and nothing in this repository had ever loaded one. The
+    /// fixture is the same pyramid in the binary container, so a difference
+    /// here is the container and nothing else.
+    #[test]
+    fn a_binary_glb_imports_identically_to_its_gltf() {
+        let text = import_gltf(std::path::Path::new("../../assets/test/gltf/pyramid.gltf"))
+            .expect("gltf");
+        let binary = import_gltf(std::path::Path::new("../../assets/test/gltf/pyramid.glb"))
+            .expect("glb");
+
+        assert_eq!(binary.vertices, text.vertices, "the container changed the geometry");
+        assert_eq!(binary.indices, text.indices);
     }
 }

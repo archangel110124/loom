@@ -5294,7 +5294,21 @@ fn gltf_sidecars(path: &std::path::Path) -> Vec<String> {
             continue;
         };
         for uri in items.iter().filter_map(|i| i.get("uri")?.as_str()) {
-            if uri.starts_with("data:") || uri.contains("://") || uri.contains('/') {
+            // Already inside the file, or not ours to fetch.
+            if uri.starts_with("data:") || uri.contains("://") {
+                continue;
+            }
+            // **A subfolder is reported, not skipped in silence.** This copies
+            // into one flat directory, so `textures/wood.png` would land
+            // somewhere the manifest does not name — and the import would look
+            // like it worked while the mesh failed to build later, unwatched.
+            // That is the exact failure this function exists to prevent, so it
+            // says so instead of quietly dropping the file.
+            if uri.contains('/') {
+                crate::log::warn(format!(
+                    "that glTF references `{uri}` in a subfolder; import copies into one \
+                     folder, so copy it across by hand or export with flat paths"
+                ));
                 continue;
             }
             if !found.iter().any(|f: &String| f == uri) {

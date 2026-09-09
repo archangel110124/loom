@@ -178,3 +178,80 @@ dropped.
 That last one is worth naming as a category: the sharpest finding of two review
 rounds was not a missing feature. It was a capability the engine already had and
 one line of the editor refused.
+
+## Third addendum, after the third pass — 2026-09-09
+
+7/10. The score went *down*, correctly: the previous round's fix shipped a
+defect worse than the one it closed, and two claims in this very ADR were
+false.
+
+**"+ add" wrote scenes the engine will not load.** `sorted_insertion` returned
+`Some((0, 0.0))` for *any* empty array — a test asserted it — so the `at` that
+belongs to a `MoodStage` was injected into the blank entry of every empty array
+in the engine. On `VoxelVolume.ops` that produced `ops = [{ at = 0.0 }]`, which
+the op layer **accepted** and `loom validate` then refused with
+`missing field 'kind'`. The button's own comment said "appending something
+invalid would be worse: the transaction would be rejected and the button would
+look broken" — describing a better outcome than the one that shipped, which was
+accepted *and* broken. Making every unwritten field visible is what put that
+button on screen everywhere.
+
+Two changes. `sorted_insertion` asks the item schema whether it declares an
+`at`, instead of assuming an empty array is a stage list. And "+ add" is offered
+only where the editor can build an entry the engine will load — an item schema
+with `properties`. Measured across every object-array in the engine:
+`Buoyancy.pontoons` and `Scatter.exclude` accept `{}`, `Environment.stages`
+takes its `at`, and `VoxelVolume.chunks` and `VoxelVolume.ops` accept nothing
+the editor can construct. `ops` is `Vec<serde_json::Value>` because its
+vocabulary lives in `loom_voxel`, which `loom_scene` may not depend on — so the
+schema genuinely cannot describe an entry, and the honest answer is a disabled
+button that says so.
+
+That exposes something worth naming: **the op layer can write a scene
+`loom validate` rejects.** `apply` re-parses with `Scene::parse`; the voxel-op
+check lives in the CLI, on the far side of a dependency boundary `loom_scene`
+cannot cross. Two validators, and the op layer is the weaker one. Not fixed
+here — the boundary is deliberate — but the button is no longer the place that
+discovers it.
+
+**The array `$ref` was never followed.** `field_schema` resolves a field's own
+`$ref` and stops, so an array of structs arrived with
+`items: { "$ref": "#/$defs/MoodStage" }` and every question about an entry — has
+it properties, does it carry an `at`, what is this number's range — got no
+answer from a reference nothing followed. Two of those decide whether a button
+corrupts a scene, so `resolve_items` follows it.
+
+**And the glTF claim in the second addendum was half true.** The engine did
+always read glTF, and the whitelist was a real bug. But `import_gltf` iterated
+`document.meshes()` and never looked at the scene graph: a file placing one
+pyramid mesh at two nodes six metres apart imported as **one pyramid at the
+origin**. Every node transform discarded, every instance collapsed, every mesh
+in the file merged whether a scene referenced it or not. Blender writes a node
+per object, so that was wrong for essentially every real export — and wrong
+silently. "The engine could always read glTF" was true only of single-mesh,
+origin-anchored geometry: the fixture, exactly.
+
+It walks the scene graph now, baking each node's accumulated transform into the
+vertices, with normals through the **cofactor** of the upper 3×3 — the inverse
+transpose without the determinant, which a direction does not need. `#Name`
+selects one node's subtree, the same fragment `import_obj_object` has, and it
+reaches both importers now instead of only the OBJ one. A missing `NORMAL`
+attribute is computed as flat normals per the spec, which is what the comment
+beside that code already claimed while the code filled a constant `[0, 1, 0]` —
+every face lit as though it faced up.
+
+Fixtures: `two_pyramids.gltf` (one mesh, two nodes, ±3 m) and `pyramid.glb`.
+Nothing in this repository had ever loaded a `.glb`, the format anything real
+ships in.
+
+**Three more documentation claims were false and are corrected**: this ADR said
+sidecar URIs outside the flat folder were "reported rather than silently
+dropped" and they were silently dropped (they are reported now); the
+array-of-objects comment credited fixing `WaterBody.waves`, which is a
+`WaveSet` object and never reaches that arm; and `EDITOR-SCOPE.md`'s superseded
+header still listed `.obj`/`.png` as the whole of import.
+
+Still open, honestly: the per-wave Gerstner list. `WaterBody.waves.waves` is an
+object-array one level below a nested object, where `object_fields` edits only
+scalars — and `SetField` splits its field name once, so it cannot address that
+path either. Authoring individual Gerstner waves is `loom scene --tx` work.

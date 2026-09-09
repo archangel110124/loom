@@ -8,7 +8,11 @@ publish.workspace = true
 
 [dependencies]
 blake3 = "=1.8.5"
-gltf = { version = "=1.4.1", default-features = false, features = ["import", "utils"] }
+# `names` is not decoration: without it `Node::name()` does not exist, and a
+# `model.gltf#Hull` fragment — the same selection `import_obj_object` has — has
+# nothing to match against. An exported file is a library of things, and picking
+# one out of it is the difference between using an asset and merging it.
+gltf = { version = "=1.4.1", default-features = false, features = ["import", "names", "utils"] }
 png = "=0.18.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"

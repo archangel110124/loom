@@ -2433,7 +2433,7 @@ fn inspect_component(
         // `$defs` and both spellings of an enum flattened. See
         // `loom_reflect::field_schema`.
         let resolved = match (root, properties.and_then(|p| p.get(field))) {
-            (Some(r), Some(f)) => Some(loom_reflect::field_schema(r, f)),
+            (Some(r), Some(f)) => Some(resolve_items(r, loom_reflect::field_schema(r, f))),
             _ => None,
         };
         let schema = resolved.as_deref();
@@ -2460,6 +2460,33 @@ fn inspect_component(
             draw_field(ui, path, &key, field, current, schema, editable, ctx, actions);
         });
     }
+}
+
+/// A field schema with its array `items` `$ref` followed.
+///
+/// **`field_schema` resolves the field's own `$ref` and stops.** An array of
+/// structs — `Environment.stages`, `Buoyancy.pontoons`, `Scatter.exclude` —
+/// therefore arrived with `items: { "$ref": "#/$defs/MoodStage" }`, and every
+/// question anything downstream asks of an entry ("does it have properties?",
+/// "does it carry an `at`?", "what is this number's range?") got no answer from
+/// a reference it could not follow. Two of those questions decide whether a
+/// button corrupts the scene, so this is not cosmetic.
+fn resolve_items<'a>(
+    root: &'a serde_json::Value,
+    schema: std::borrow::Cow<'a, serde_json::Value>,
+) -> std::borrow::Cow<'a, serde_json::Value> {
+    let Some(items) = schema.get("items") else {
+        return schema;
+    };
+    if items.get("$ref").is_none() {
+        return schema;
+    }
+    let resolved = loom_reflect::field_schema(root, items).into_owned();
+    let mut owned = schema.into_owned();
+    if let Some(object) = owned.as_object_mut() {
+        object.insert("items".to_owned(), resolved);
+    }
+    std::borrow::Cow::Owned(owned)
 }
 
 /// Does this array hold numbers — a vector, a colour, an attenuation triple?
@@ -2633,6 +2660,16 @@ fn draw_field(
             }
         }
 
+        // An empty numeric array draws no boxes, so say so rather than leaving a
+        // blank line. A fixed-size vector is never empty in practice, which is
+        // why this is a label and not an editor.
+        serde_json::Value::Array(items) if items.is_empty() && array_is_numeric(items, schema) => {
+            ui.add(egui::Label::new(
+                egui::RichText::new("empty").weak().italics(),
+            ))
+            .on_hover_text("a list of numbers with nothing in it — author it with `loom scene --tx`");
+        }
+
         serde_json::Value::Array(items) if array_is_numeric(items, schema) => {
             let mut edited: Vec<f64> =
                 items.iter().filter_map(serde_json::Value::as_f64).collect();
@@ -2703,9 +2740,18 @@ fn draw_field(
         }
 
         // **An array of objects gets rows and a splice, not a JSON blob.**
-        // `WaterBody.waves`, `Buoyancy.pontoons`, `Scatter.excludes` and a
+        // `Buoyancy.pontoons`, `Scatter.exclude`, `Environment.stages` and a
         // voxel recipe were all a single unreadable line that could only be
         // edited in a text editor.
+        //
+        // **Not `WaterBody.waves`**, which this comment used to claim. That
+        // field is a `WaveSet` *object*, so it takes the nested-object arm
+        // below; its `waves` array is one level further down, where
+        // `object_fields` edits only scalars and small numeric arrays. So the
+        // per-wave Gerstner list is still text here, and `SetField` cannot
+        // address `WaterBody.waves.waves` either — it splits the field name once
+        // and treats the rest as a literal key. Authoring individual Gerstner
+        // waves is `loom scene --tx` work until that changes.
         // **A nested object is edited, not printed.** `WaterBody.swell` — the
         // three numbers that *are* the FFT sea — reached the inspector as the
         // literal text `{"direction":[0.25881904,0.9659258],"fetch":420000.0,
@@ -2982,7 +3028,23 @@ fn object_fields(
 /// `None` when the entries carry no `at`, which is every other array and where
 /// appending is right.
 #[must_use]
-pub fn sorted_insertion(items: &[serde_json::Value]) -> Option<(usize, f64)> {
+pub fn sorted_insertion(
+    items: &[serde_json::Value],
+    entry: Option<&serde_json::Value>,
+) -> Option<(usize, f64)> {
+    // **An empty array cannot say what it holds, so the schema must.** This
+    // returned `Some((0, 0.0))` for *any* empty array, so "+ add" injected an
+    // `at` — a `MoodStage` field — into the blank entry of every empty array in
+    // the engine. On `VoxelVolume.ops` that produced `ops = [{ at = 0.0 }]`,
+    // which the op layer accepted and `loom validate` then refused: a button
+    // that wrote a scene the engine will not load.
+    let declares_at = entry
+        .and_then(|e| e.get("properties"))
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|p| p.contains_key("at"));
+    if items.is_empty() {
+        return declares_at.then_some((0, 0.0));
+    }
     let ats: Vec<f64> = items
         .iter()
         .map(|item| item.get("at").and_then(serde_json::Value::as_f64))
@@ -3097,14 +3159,40 @@ fn array_of_objects(
                     }
                 });
         }
-        if editable && ui.small_button("+ add").clicked() {
+        // **Only where the editor can build an entry the engine will load.**
+        // `default_entry` writes the item schema's required fields; an item
+        // schema with no `properties` at all gives it nothing, and `{}` is not a
+        // legal entry everywhere. Measured on every object-array in the engine:
+        // `Buoyancy.pontoons` and `Scatter.exclude` accept `{}`,
+        // `Environment.stages` takes its `at`, and `VoxelVolume.chunks`
+        // (`[i32; 3]`, not a struct) and `VoxelVolume.ops` (`Vec<Value>`, whose
+        // vocabulary lives in `loom_voxel` where `loom_scene` cannot reach it)
+        // do not — `ops = [{}]` applies and then fails `loom validate` with
+        // `missing field 'kind'`.
+        //
+        // The op layer cannot catch this: it re-parses with `Scene::parse`,
+        // while the voxel-op check lives in the CLI on the far side of a
+        // dependency boundary. So the button is the place to be honest.
+        let buildable = schema
+            .and_then(|s| s.get("items"))
+            .and_then(|i| i.get("properties"))
+            .is_some();
+        if !buildable {
+            ui.add_enabled(false, egui::Button::new("+ add").small())
+                .on_disabled_hover_text(
+                    "this list's entries are not described by the schema, so the \
+                     editor cannot write one that will load — author it with \
+                     `loom scene --tx`",
+                );
+        }
+        if buildable && editable && ui.small_button("+ add").clicked() {
             // A new entry at the schema's defaults, which for an untyped
             // recipe is an empty table the human then fills in. Appending
             // something invalid would be worse: the transaction would be
             // rejected and the button would look broken.
             let mut blank = default_entry(schema);
             // A sorted array gets the entry placed, not appended — ADR 0101.
-            let at = sorted_insertion(items);
+            let at = sorted_insertion(items, schema.and_then(|s| s.get("items")));
             if let Some((_, value)) = at
                 && let Some(object) = blank.as_object_mut()
                 && let Some(number) = serde_json::Number::from_f64(value)
@@ -3190,7 +3278,7 @@ mod tests {
             .iter()
             .map(|at| serde_json::json!({ "at": at }))
             .collect();
-        let (index, at) = sorted_insertion(&stages).expect("these carry an at");
+        let (index, at) = sorted_insertion(&stages, None).expect("these carry an at");
         // The widest run is 0.5..0.8; 0.25..0.5 and 0.0..0.25 are narrower.
         assert_eq!(index, 3, "between 0.5 and 0.8");
         assert!((at - 0.65).abs() < 1e-9, "{at}");
@@ -3211,15 +3299,33 @@ mod tests {
     #[test]
     fn the_room_after_the_last_stage_is_a_gap() {
         let stages = vec![serde_json::json!({ "at": 0.0 }), serde_json::json!({ "at": 0.1 })];
-        let (index, at) = sorted_insertion(&stages).expect("carries an at");
+        let (index, at) = sorted_insertion(&stages, None).expect("carries an at");
         assert_eq!(index, 2, "after the last, where the room is");
         assert!(at > 0.1 && at < 1.0, "{at}");
     }
 
-    /// An empty array starts at the beginning.
+    /// An empty *stage* array starts at the beginning — and an empty anything
+    /// else does not get an `at` at all.
+    ///
+    /// **This test used to assert `sorted_insertion(&[]) == Some((0, 0.0))`
+    /// unconditionally**, which is where the defect lived: "+ add" then wrote an
+    /// `at` into the blank entry of every empty array in the engine, and
+    /// `ops = [{ at = 0.0 }]` applied cleanly and then failed `loom validate`
+    /// with `missing field 'kind'`.
     #[test]
-    fn the_first_stage_starts_at_zero() {
-        assert_eq!(sorted_insertion(&[]), Some((0, 0.0)));
+    fn the_first_stage_starts_at_zero_and_nothing_else_does() {
+        let stage = serde_json::json!({
+            "properties": { "at": { "type": "number" }, "name": { "type": "string" } },
+        });
+        assert_eq!(sorted_insertion(&[], Some(&stage)), Some((0, 0.0)));
+
+        // A pontoon, a voxel op, an untyped entry: no `at`, no placement.
+        let pontoon = serde_json::json!({
+            "properties": { "offset": { "type": "array" }, "radius": { "type": "number" } },
+        });
+        assert_eq!(sorted_insertion(&[], Some(&pontoon)), None);
+        assert_eq!(sorted_insertion(&[], Some(&serde_json::json!(true))), None);
+        assert_eq!(sorted_insertion(&[], None), None);
     }
 
     /// **Every other array still appends.** Pontoons and voxel ops carry no
@@ -3228,7 +3334,7 @@ mod tests {
     #[test]
     fn an_unsorted_array_is_left_alone() {
         let pontoons = vec![serde_json::json!({ "radius": 1.0 })];
-        assert_eq!(sorted_insertion(&pontoons), None);
+        assert_eq!(sorted_insertion(&pontoons, None), None);
     }
 
 

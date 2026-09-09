@@ -2086,10 +2086,13 @@ impl MeshLibrary {
                     .and_then(|e| e.to_str())
                     .unwrap_or_default()
                     .to_ascii_lowercase();
+                // The `#fragment` reaches both importers now. It only ever
+                // reached the OBJ one, so `model.glb#Hull` silently merged the
+                // whole file and drew every object in it as one mesh.
                 let imported = if ext == "obj" {
                     loom_asset::mesh::import_obj_object(&path, object.as_deref())
                 } else {
-                    loom_asset::mesh::import_gltf(&path)
+                    loom_asset::mesh::import_gltf_object(&path, object.as_deref())
                 };
                 match imported {
                     Ok(mesh) => Some(mesh),

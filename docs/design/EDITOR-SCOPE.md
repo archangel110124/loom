@@ -24,8 +24,11 @@
 >
 > **§3 onward — the comparison against Unity, Unreal and Godot, and what is still
 > genuinely absent — stands.** The gaps it names (no animation tooling, no
-> in-editor scripting, `.obj`/`.png` import only, no game-UI designer, no terrain
-> brush, no build UI) are all still real.
+> in-editor scripting, no game-UI designer, no terrain brush, no build UI) are
+> all still real — **except the import line**, which said `.obj`/`.png` only.
+> `.glb` and `.gltf` import too, with node transforms baked and `#Name`
+> selecting one node; materials and animation from a glTF are still discarded,
+> which is the honest shape of that gap (ADR 0108, second addendum).
 >
 > The ADRs in `docs/decisions/0088`–`0108` are the current record. This file is
 > kept for its comparison and its reasoning, not for its status table.
